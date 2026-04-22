@@ -39,7 +39,15 @@ compile-time integer literals.
 
 ## Scope And Names
 
-Names must be declared before use.
+Top-level global and function names are collected before semantic checking.
+Function bodies and global initializer expressions may refer to top-level names
+declared later in the file.
+
+Global initializer expressions execute in source order before `main`. Globals
+start as zero, so an initializer that reads a later global observes that
+global's zero value until the later initializer runs.
+
+Local variables and parameters are visible only after their declarations.
 
 MiniLang currently rejects shadowing: a local variable or parameter may not use
 the same name as another visible local, parameter, global, or function. This
@@ -95,6 +103,9 @@ Arrays are zero-indexed and bounds-checked. Out-of-bounds access traps with
 `TRAP_ARRAY_OOB`. The default VM stores arrays in VM-owned storage; the `--gc`
 VM stores arrays as heap objects and traces references from the stack, globals,
 and call frames.
+
+Array declarations do not currently have initializer syntax. Array elements
+start as zero once the array is allocated.
 
 ## Functions
 

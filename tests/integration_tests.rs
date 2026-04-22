@@ -224,6 +224,14 @@ fn test_global_initializer_expression() {
     run_expect("int g = 40 + 2; func main() { return g; }", 42);
 }
 
+#[test]
+fn test_global_initializer_can_call_function() {
+    run_expect(
+        "func id(int x) { return x; } int g = id(41); func main() { return g + 1; }",
+        42,
+    );
+}
+
 // ============================================================================
 // Control Flow
 // ============================================================================
@@ -259,6 +267,14 @@ fn test_while_loop() {
 fn test_function_call() {
     run_expect(
         "func add(int a, int b) { return a + b; } func main() { return add(3, 4); }",
+        7,
+    );
+}
+
+#[test]
+fn test_function_can_call_later_function() {
+    run_expect(
+        "func main() { return later(); } func later() { return 7; }",
         7,
     );
 }
@@ -316,6 +332,21 @@ fn test_trap_div_zero() {
 #[test]
 fn test_trap_undefined_local() {
     run_expect_trap("func main() { int x; return x; }", TrapCode::UndefinedLocal);
+}
+
+#[test]
+fn test_expression_statements_discard_values() {
+    run_expect(
+        "func tick() { return 1; } func main() { int x = 1; x; (x + 2); tick(); return 4; }",
+        4,
+    );
+}
+
+#[test]
+fn test_opt_preserves_undefined_local_expr_trap() {
+    let result = run_optimized("func main() { int x; x; return 0; }");
+    assert!(!result.success, "expected trap but got success");
+    assert_eq!(result.trap_code, TrapCode::UndefinedLocal);
 }
 
 #[test]

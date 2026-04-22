@@ -30,6 +30,12 @@ impl Parser {
             .unwrap_or(&self.tokens[self.tokens.len() - 1])
     }
 
+    fn token_at(&self, offset: usize) -> &Token {
+        self.tokens
+            .get(self.pos + offset)
+            .unwrap_or(&self.tokens[self.tokens.len() - 1])
+    }
+
     fn advance(&mut self) -> &Token {
         let token = self.current();
         if !matches!(token.kind, TokenKind::Eof) {
@@ -206,8 +212,45 @@ impl Parser {
             TokenKind::While => self.parse_while(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Print => self.parse_print(),
-            TokenKind::Identifier(_) => self.parse_assign_or_expr(),
+            TokenKind::Identifier(_) if self.is_assignment_start() => self.parse_assignment(),
+            TokenKind::Identifier(_)
+            | TokenKind::IntLiteral(_)
+            | TokenKind::BoolLiteral(_)
+            | TokenKind::LParen
+            | TokenKind::Minus
+            | TokenKind::Not => self.parse_expr_stmt(),
             _ => self.error("Expected statement"),
+        }
+    }
+
+    fn is_assignment_start(&self) -> bool {
+        if !matches!(self.current().kind, TokenKind::Identifier(_)) {
+            return false;
+        }
+
+        if matches!(self.token_at(1).kind, TokenKind::Assign) {
+            return true;
+        }
+
+        if !matches!(self.token_at(1).kind, TokenKind::LBracket) {
+            return false;
+        }
+
+        let mut depth = 0usize;
+        let mut offset = 1usize;
+        loop {
+            match self.token_at(offset).kind {
+                TokenKind::LBracket => depth += 1,
+                TokenKind::RBracket => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return matches!(self.token_at(offset + 1).kind, TokenKind::Assign);
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            offset += 1;
         }
     }
 
@@ -247,7 +290,7 @@ impl Parser {
         })
     }
 
-    fn parse_assign_or_expr(&mut self) -> ParseResult<Stmt> {
+    fn parse_assignment(&mut self) -> ParseResult<Stmt> {
         let span = self.current().span;
         let name = match &self.current().kind {
             TokenKind::Identifier(s) => s.clone(),
@@ -282,18 +325,7 @@ impl Parser {
             });
         }
 
-        // Function call as statement: foo();
-        if self.match_token(&TokenKind::LParen).is_some() {
-            let args = self.parse_args()?;
-            self.expect(&TokenKind::RParen, "Expected ')'")?;
-            self.expect(&TokenKind::Semicolon, "Expected ';'")?;
-            return Ok(Stmt::ExprStmt {
-                expr: Expr::Call { name, args, span },
-                span,
-            });
-        }
-
-        self.error("Expected assignment or function call")
+        self.error("Expected assignment")
     }
 
     fn parse_if(&mut self) -> ParseResult<Stmt> {
@@ -351,6 +383,13 @@ impl Parser {
         self.expect(&TokenKind::Semicolon, "Expected ';'")?;
 
         Ok(Stmt::Print { value, span })
+    }
+
+    fn parse_expr_stmt(&mut self) -> ParseResult<Stmt> {
+        let span = self.current().span;
+        let expr = self.parse_expr()?;
+        self.expect(&TokenKind::Semicolon, "Expected ';'")?;
+        Ok(Stmt::ExprStmt { expr, span })
     }
 
     fn parse_expr(&mut self) -> ParseResult<Expr> {
@@ -627,5 +666,38 @@ mod tests {
         let program = parse("int g = 10; func main() { return g; }").unwrap();
         assert_eq!(program.globals.len(), 1);
         assert_eq!(program.functions.len(), 1);
+    }
+
+    #[test]
+    fn test_expression_statements() {
+        let program = parse("func main() { int x = 1; 1; (x + 2); x; foo(); return 0; }").unwrap();
+        assert!(matches!(
+            &program.functions[0].body[1],
+            Stmt::ExprStmt {
+                expr: Expr::IntLiteral { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &program.functions[0].body[2],
+            Stmt::ExprStmt {
+                expr: Expr::Binary { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &program.functions[0].body[3],
+            Stmt::ExprStmt {
+                expr: Expr::Identifier { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &program.functions[0].body[4],
+            Stmt::ExprStmt {
+                expr: Expr::Call { .. },
+                ..
+            }
+        ));
     }
 }

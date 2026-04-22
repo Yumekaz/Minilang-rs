@@ -29,7 +29,7 @@ int, bool, if, else, while, return, print, func, true, false
 ```ebnf
 program     = { global_decl | function }* ;
 
-global_decl = type IDENTIFIER [ "[" INTEGER "]" ] [ "=" expr ] ";" ;
+global_decl = type IDENTIFIER ( "[" INTEGER "]" | [ "=" expr ] ) ";" ;
 
 function    = "func" IDENTIFIER "(" [ params ] ")" block ;
 
@@ -48,7 +48,7 @@ statement   = var_decl
             | print_stmt
             | expr_stmt ;
 
-var_decl    = type IDENTIFIER [ "[" INTEGER "]" ] [ "=" expr ] ";" ;
+var_decl    = type IDENTIFIER ( "[" INTEGER "]" | [ "=" expr ] ) ";" ;
 
 assignment  = IDENTIFIER [ "[" expr "]" ] "=" expr ";" ;
 
@@ -91,7 +91,7 @@ args        = expr { "," expr }* ;
 
 1. All functions must have return type `int`
 2. A `main` function with no parameters must exist
-3. Variables must be declared before use
+3. Top-level names are visible throughout the program; local names are visible after declaration
 4. Array indices must be `int` type
 5. Condition expressions must be `int` or `bool` (0 = false, non-zero = true)
 6. Function calls must match parameter count and types

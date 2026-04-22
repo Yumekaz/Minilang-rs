@@ -86,3 +86,8 @@ fn parameter_shadowing_global_is_rejected() {
         "shadows existing symbol",
     );
 }
+
+#[test]
+fn array_initializer_syntax_is_rejected() {
+    compile_expect_err("func main() { int a[3] = 7; return 0; }", "Expected ';'");
+}

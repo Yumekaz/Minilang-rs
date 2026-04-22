@@ -138,20 +138,6 @@ impl SemanticAnalyzer {
                     glob.span,
                 );
             }
-
-            // Type check initializer
-            if let Some(ref init_expr) = glob.init_expr {
-                let init_type = self.analyze_expr(init_expr);
-                if init_type != glob.var_type && init_type != Type::Error {
-                    self.error(
-                        &format!(
-                            "Type mismatch: cannot assign {:?} to {:?}",
-                            init_type, glob.var_type
-                        ),
-                        glob.span,
-                    );
-                }
-            }
         }
 
         // Collect functions
@@ -174,6 +160,22 @@ impl SemanticAnalyzer {
                     self.error(
                         &format!("Duplicate top-level symbol: {}", func.name),
                         func.span,
+                    );
+                }
+            }
+        }
+
+        // Type check global initializers after collecting all top-level names.
+        for glob in &program.globals {
+            if let Some(ref init_expr) = glob.init_expr {
+                let init_type = self.analyze_expr(init_expr);
+                if init_type != glob.var_type && init_type != Type::Error {
+                    self.error(
+                        &format!(
+                            "Type mismatch: cannot assign {:?} to {:?}",
+                            init_type, glob.var_type
+                        ),
+                        glob.span,
                     );
                 }
             }
