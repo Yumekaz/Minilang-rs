@@ -319,13 +319,6 @@ fn test_trap_undefined_local() {
 }
 
 #[test]
-fn test_opt_preserves_undefined_local_expr_trap() {
-    let result = run_optimized("func main() { int x; x; return 0; }");
-    assert!(!result.success, "expected trap but got success");
-    assert_eq!(result.trap_code, TrapCode::UndefinedLocal);
-}
-
-#[test]
 fn test_opt_control_flow_keeps_jump_targets() {
     let result =
         run_optimized("func main() { int x = 1 + 2; if (x == 3) { return 7; } return 9; }");

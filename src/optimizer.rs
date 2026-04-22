@@ -392,8 +392,16 @@ impl Default for Optimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::{TrapCode, Vm};
 
     fn make_program(instructions: Vec<Instruction>) -> CompiledProgram {
+        make_program_with_locals(instructions, 0)
+    }
+
+    fn make_program_with_locals(
+        instructions: Vec<Instruction>,
+        local_count: usize,
+    ) -> CompiledProgram {
         let mut functions = HashMap::new();
         functions.insert(
             0,
@@ -402,7 +410,7 @@ mod tests {
                 id: 0,
                 entry_pc: 0,
                 param_count: 0,
-                local_count: 0,
+                local_count,
             },
         );
 
@@ -496,6 +504,27 @@ mod tests {
         assert_eq!(optimized.instructions[0].opcode, Opcode::LoadLocal);
         assert_eq!(optimized.instructions[1].opcode, Opcode::Pop);
         assert_eq!(opt.stats.peephole_optimizations, 0);
+    }
+
+    #[test]
+    fn test_optimized_load_local_pop_still_traps() {
+        let program = make_program_with_locals(
+            vec![
+                Instruction::new(Opcode::LoadLocal, 0, 0),
+                Instruction::new(Opcode::Pop, 0, 0),
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            1,
+        );
+
+        let mut opt = Optimizer::new();
+        let optimized = opt.optimize(program);
+        let mut vm = Vm::new(&optimized);
+        let result = vm.run();
+
+        assert!(!result.success, "expected trap but got success");
+        assert_eq!(result.trap_code, TrapCode::UndefinedLocal);
     }
 
     #[test]
