@@ -8,7 +8,7 @@
 //!   perf record -g ./target/release/minilang examples/fibonacci.lang --bench
 //!   perf report
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 use minilang::{
     BumpAllocator, Compiler, FreeListAllocator, GarbageCollector, Lexer, Parser, SemanticAnalyzer,
