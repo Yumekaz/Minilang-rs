@@ -450,8 +450,9 @@ impl<'a> GcVm<'a> {
             }
 
             Opcode::LoadLocal => {
-                let frame = self.call_stack.last().unwrap();
-                match frame.get(arg1 as usize) {
+                let slot = self.current_local_slot(arg1)?;
+                let frame = self.current_frame()?;
+                match frame.get(slot) {
                     Some(v) => {
                         self.stack.push(v);
                         Ok(true)
@@ -464,21 +465,24 @@ impl<'a> GcVm<'a> {
             }
 
             Opcode::StoreLocal => {
+                let slot = self.current_local_slot(arg1)?;
                 let value = self.pop()?;
-                let frame = self.call_stack.last_mut().unwrap();
-                frame.set(arg1 as usize, value);
+                let frame = self.current_frame_mut()?;
+                frame.set(slot, value);
                 Ok(true)
             }
 
             Opcode::LoadGlobal => {
-                let value = self.globals[arg1 as usize];
+                let slot = self.global_slot(arg1)?;
+                let value = self.globals[slot];
                 self.stack.push(value);
                 Ok(true)
             }
 
             Opcode::StoreGlobal => {
+                let slot = self.global_slot(arg1)?;
                 let value = self.pop()?;
-                self.globals[arg1 as usize] = value;
+                self.globals[slot] = value;
                 Ok(true)
             }
 
@@ -643,6 +647,18 @@ impl<'a> GcVm<'a> {
             }
 
             Opcode::Call => {
+                if arg1 < 0 {
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        format!("Negative function id {}", arg1),
+                    ));
+                }
+                if arg2 < 0 {
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        format!("Negative call argument count {}", arg2),
+                    ));
+                }
                 let func_id = arg1 as usize;
                 let arg_count = arg2 as usize;
 
@@ -660,6 +676,16 @@ impl<'a> GcVm<'a> {
                     return Err((
                         TrapCode::StackOverflow,
                         format!("Call stack overflow (max {} frames)", Self::MAX_FRAMES),
+                    ));
+                }
+
+                if arg_count > func.local_count {
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        format!(
+                            "Call has {} arguments but function {} has {} local slots",
+                            arg_count, func_id, func.local_count
+                        ),
                     ));
                 }
 
@@ -708,22 +734,21 @@ impl<'a> GcVm<'a> {
             }
 
             Opcode::ArrayLoad => {
-                let base = arg1 as usize;
-                let size = arg2 as usize;
-                let index = self.pop_int()? as usize;
-
-                if index >= size {
-                    return Err((
-                        TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, size),
-                    ));
-                }
+                let (base, size) = self.global_array_range(arg1, arg2)?;
+                let index = Self::array_index(self.pop_int()?, size)?;
 
                 // Check if this is a global array (stored as ArrayRef)
                 let value = match &self.globals[base] {
                     GcValue::ArrayRef(id) => {
                         if let Some(arr) = self.get_array(*id) {
-                            GcValue::Int(arr.data[index])
+                            GcValue::Int(*arr.data.get(index).ok_or((
+                                TrapCode::ArrayOutOfBounds,
+                                format!(
+                                    "Array index {} out of bounds (size {})",
+                                    index,
+                                    arr.data.len()
+                                ),
+                            ))?)
                         } else {
                             return Err((
                                 TrapCode::InvalidInstruction,
@@ -742,23 +767,22 @@ impl<'a> GcVm<'a> {
             }
 
             Opcode::ArrayStore => {
-                let base = arg1 as usize;
-                let size = arg2 as usize;
+                let (base, size) = self.global_array_range(arg1, arg2)?;
                 let value = self.pop_int()?;
-                let index = self.pop_int()? as usize;
-
-                if index >= size {
-                    return Err((
-                        TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, size),
-                    ));
-                }
+                let index = Self::array_index(self.pop_int()?, size)?;
 
                 // Check if this is a global array
                 match self.globals[base] {
                     GcValue::ArrayRef(id) => {
                         if let Some(arr) = self.get_array_mut(id) {
-                            arr.data[index] = value;
+                            let len = arr.data.len();
+                            let Some(element) = arr.data.get_mut(index) else {
+                                return Err((
+                                    TrapCode::ArrayOutOfBounds,
+                                    format!("Array index {} out of bounds (size {})", index, len),
+                                ));
+                            };
+                            *element = value;
                         } else {
                             return Err((
                                 TrapCode::InvalidInstruction,
@@ -776,22 +800,21 @@ impl<'a> GcVm<'a> {
             }
 
             Opcode::LocalArrayLoad => {
-                let base = arg1 as usize;
-                let size = arg2 as usize;
-                let index = self.pop_int()? as usize;
-
-                if index >= size {
-                    return Err((
-                        TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, size),
-                    ));
-                }
-
-                let frame = self.call_stack.last().unwrap();
-                let value = match frame.get(base) {
+                let base = self.current_local_slot(arg1)?;
+                let size = Self::array_size(arg2)?;
+                let index = Self::array_index(self.pop_int()?, size)?;
+                let local_value = self.current_frame()?.get(base);
+                let value = match local_value {
                     Some(GcValue::ArrayRef(id)) => {
                         if let Some(arr) = self.get_array(id) {
-                            GcValue::Int(arr.data[index])
+                            GcValue::Int(*arr.data.get(index).ok_or((
+                                TrapCode::ArrayOutOfBounds,
+                                format!(
+                                    "Array index {} out of bounds (size {})",
+                                    index,
+                                    arr.data.len()
+                                ),
+                            ))?)
                         } else {
                             return Err((
                                 TrapCode::InvalidInstruction,
@@ -813,20 +836,12 @@ impl<'a> GcVm<'a> {
             }
 
             Opcode::LocalArrayStore => {
-                let base = arg1 as usize;
-                let size = arg2 as usize;
+                let base = self.current_local_slot(arg1)?;
+                let size = Self::array_size(arg2)?;
                 let value = self.pop_int()?;
-                let index = self.pop_int()? as usize;
-
-                if index >= size {
-                    return Err((
-                        TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, size),
-                    ));
-                }
-
-                let frame = self.call_stack.last().unwrap();
-                let array_ref = match frame.get(base) {
+                let index = Self::array_index(self.pop_int()?, size)?;
+                let local_value = self.current_frame()?.get(base);
+                let array_ref = match local_value {
                     Some(GcValue::ArrayRef(id)) => id,
                     _ => {
                         return Err((
@@ -837,7 +852,14 @@ impl<'a> GcVm<'a> {
                 };
 
                 if let Some(arr) = self.get_array_mut(array_ref) {
-                    arr.data[index] = value;
+                    let len = arr.data.len();
+                    let Some(element) = arr.data.get_mut(index) else {
+                        return Err((
+                            TrapCode::ArrayOutOfBounds,
+                            format!("Array index {} out of bounds (size {})", index, len),
+                        ));
+                    };
+                    *element = value;
                 } else {
                     return Err((
                         TrapCode::InvalidInstruction,
@@ -850,7 +872,7 @@ impl<'a> GcVm<'a> {
 
             Opcode::AllocArray => {
                 // Allocate a new array on the heap
-                let size = arg1 as usize;
+                let size = Self::array_size(arg1)?;
                 let array_id = self.alloc_array(size);
                 self.stack.push(GcValue::ArrayRef(array_id));
                 Ok(true)
@@ -858,12 +880,133 @@ impl<'a> GcVm<'a> {
 
             Opcode::ArrayNew => {
                 // Legacy opcode - same as AllocArray
-                let size = arg1 as usize;
+                let size = Self::array_size(arg1)?;
                 let array_id = self.alloc_array(size);
                 self.stack.push(GcValue::ArrayRef(array_id));
                 Ok(true)
             }
         }
+    }
+
+    fn current_frame(&self) -> Result<&GcCallFrame, (TrapCode, String)> {
+        self.call_stack.last().ok_or((
+            TrapCode::InvalidInstruction,
+            "No active call frame".to_string(),
+        ))
+    }
+
+    fn current_frame_mut(&mut self) -> Result<&mut GcCallFrame, (TrapCode, String)> {
+        self.call_stack.last_mut().ok_or((
+            TrapCode::InvalidInstruction,
+            "No active call frame".to_string(),
+        ))
+    }
+
+    fn current_local_slot(&self, raw_slot: i32) -> Result<usize, (TrapCode, String)> {
+        if raw_slot < 0 {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!("Negative local slot {}", raw_slot),
+            ));
+        }
+
+        let slot = raw_slot as usize;
+        let frame = self.current_frame()?;
+        if slot >= frame.locals.len() {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Local slot {} out of range ({} locals)",
+                    slot,
+                    frame.locals.len()
+                ),
+            ));
+        }
+
+        Ok(slot)
+    }
+
+    fn global_slot(&self, raw_slot: i32) -> Result<usize, (TrapCode, String)> {
+        if raw_slot < 0 {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!("Negative global slot {}", raw_slot),
+            ));
+        }
+
+        let slot = raw_slot as usize;
+        if slot >= self.globals.len() {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Global slot {} out of range ({} slots)",
+                    slot,
+                    self.globals.len()
+                ),
+            ));
+        }
+
+        Ok(slot)
+    }
+
+    fn global_array_range(
+        &self,
+        raw_base_slot: i32,
+        raw_array_size: i32,
+    ) -> Result<(usize, usize), (TrapCode, String)> {
+        let base_slot = self.global_slot(raw_base_slot)?;
+        let array_size = Self::array_size(raw_array_size)?;
+        let end = base_slot.checked_add(array_size).ok_or((
+            TrapCode::InvalidInstruction,
+            "Global array range overflow".to_string(),
+        ))?;
+
+        if end > self.globals.len() {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Global array range [{}..{}) exceeds {} global slots",
+                    base_slot,
+                    end,
+                    self.globals.len()
+                ),
+            ));
+        }
+
+        Ok((base_slot, array_size))
+    }
+
+    fn array_size(raw_size: i32) -> Result<usize, (TrapCode, String)> {
+        if raw_size < 0 {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!("Negative array size {}", raw_size),
+            ));
+        }
+
+        Ok(raw_size as usize)
+    }
+
+    fn array_index(raw_index: i64, array_size: usize) -> Result<usize, (TrapCode, String)> {
+        if raw_index < 0 {
+            return Err((
+                TrapCode::ArrayOutOfBounds,
+                format!(
+                    "Array index {} out of bounds (size {})",
+                    raw_index, array_size
+                ),
+            ));
+        }
+
+        let index = raw_index as usize;
+        if index >= array_size {
+            return Err((
+                TrapCode::ArrayOutOfBounds,
+                format!("Array index {} out of bounds (size {})", index, array_size),
+            ));
+        }
+
+        Ok(index)
     }
 
     /// Get GC statistics
@@ -890,10 +1033,11 @@ impl<'a> GcVm<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::Compiler;
+    use crate::compiler::{CompiledProgram, Compiler, FunctionInfo, Instruction, Opcode};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use crate::sema::SemanticAnalyzer;
+    use std::collections::HashMap;
 
     fn compile_and_run_gc(source: &str) -> GcVmResult {
         let mut lexer = Lexer::new(source);
@@ -904,6 +1048,31 @@ mod tests {
         analyzer.analyze(&program).unwrap();
         let (compiled, _) = Compiler::new().compile(&program);
         let mut vm = GcVm::new(&compiled);
+        vm.run()
+    }
+
+    fn run_bytecode(instructions: Vec<Instruction>, local_count: usize) -> GcVmResult {
+        let mut functions = HashMap::new();
+        functions.insert(
+            0,
+            FunctionInfo {
+                name: "main".to_string(),
+                id: 0,
+                entry_pc: 0,
+                param_count: 0,
+                local_count,
+            },
+        );
+
+        let program = CompiledProgram {
+            instructions,
+            functions,
+            globals: HashMap::new(),
+            main_func_id: 0,
+            constants: Vec::new(),
+        };
+
+        let mut vm = GcVm::new(&program);
         vm.run()
     }
 
@@ -953,5 +1122,79 @@ mod tests {
         assert_eq!(result.return_value, 30);
         // Check that GC allocated the array
         assert!(result.heap_arrays_allocated > 0);
+    }
+
+    #[test]
+    fn test_gc_vm_bad_global_slot_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadGlobal, GcVm::MAX_GLOBALS as i32, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_gc_vm_bad_global_array_range_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::ArrayLoad, GcVm::MAX_GLOBALS as i32, 1),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_gc_vm_bad_local_slot_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadConst, 1, 0),
+                Instruction::new(Opcode::StoreLocal, -1, 0),
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            1,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_gc_vm_too_many_call_args_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadConst, 1, 0),
+                Instruction::new(Opcode::Call, 0, 1),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_gc_vm_negative_array_allocation_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::ArrayNew, -1, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
     }
 }

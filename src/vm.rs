@@ -267,14 +267,16 @@ impl<'a> Vm<'a> {
             }
 
             Opcode::LoadGlobal => {
-                let value = self.globals[arg1 as usize];
+                let slot = self.global_slot(arg1)?;
+                let value = self.globals[slot];
                 self.stack.push(value);
                 Ok(true)
             }
 
             Opcode::StoreGlobal => {
+                let slot = self.global_slot(arg1)?;
                 let value = self.pop()?;
-                self.globals[arg1 as usize] = value;
+                self.globals[slot] = value;
                 Ok(true)
             }
 
@@ -403,6 +405,18 @@ impl<'a> Vm<'a> {
             }
 
             Opcode::Call => {
+                if arg1 < 0 {
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        format!("Negative function id {}", arg1),
+                    ));
+                }
+                if arg2 < 0 {
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        format!("Negative call argument count {}", arg2),
+                    ));
+                }
                 let func_id = arg1 as usize;
                 let arg_count = arg2 as usize;
 
@@ -495,17 +509,8 @@ impl<'a> Vm<'a> {
             }
 
             Opcode::ArrayLoad => {
-                let base_slot = arg1 as usize;
-                let array_size = arg2 as usize;
-                let index = self.pop()? as usize;
-                self.validate_global_array_range(base_slot, array_size)?;
-
-                if index >= array_size {
-                    return Err((
-                        TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, array_size),
-                    ));
-                }
+                let (base_slot, array_size) = self.global_array_range(arg1, arg2)?;
+                let index = Self::array_index(self.pop()?, array_size)?;
 
                 // For global arrays
                 let value = self.globals[base_slot + index];
@@ -514,18 +519,9 @@ impl<'a> Vm<'a> {
             }
 
             Opcode::ArrayStore => {
-                let base_slot = arg1 as usize;
-                let array_size = arg2 as usize;
+                let (base_slot, array_size) = self.global_array_range(arg1, arg2)?;
                 let value = self.pop()?;
-                let index = self.pop()? as usize;
-                self.validate_global_array_range(base_slot, array_size)?;
-
-                if index >= array_size {
-                    return Err((
-                        TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, array_size),
-                    ));
-                }
+                let index = Self::array_index(self.pop()?, array_size)?;
 
                 // For global arrays
                 self.globals[base_slot + index] = value;
@@ -533,19 +529,11 @@ impl<'a> Vm<'a> {
             }
 
             Opcode::LocalArrayLoad => {
-                let base_slot = arg1 as usize;
-                let array_size = arg2 as usize;
-                let index = self.pop()? as usize;
-
-                if index >= array_size {
-                    return Err((
-                        TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, array_size),
-                    ));
-                }
+                let array_size = Self::array_size(arg2)?;
+                let index = Self::array_index(self.pop()?, array_size)?;
 
                 // The array reference slot contains the base index into locals
-                let ref_slot = self.current_local_slot(base_slot as i32)?;
+                let ref_slot = self.current_local_slot(arg1)?;
                 let array_base = self.local_array_base(ref_slot, array_size)?;
                 let value = self.locals[array_base + index];
                 self.stack.push(value);
@@ -553,20 +541,12 @@ impl<'a> Vm<'a> {
             }
 
             Opcode::LocalArrayStore => {
-                let base_slot = arg1 as usize;
-                let array_size = arg2 as usize;
+                let array_size = Self::array_size(arg2)?;
                 let value = self.pop()?;
-                let index = self.pop()? as usize;
-
-                if index >= array_size {
-                    return Err((
-                        TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, array_size),
-                    ));
-                }
+                let index = Self::array_index(self.pop()?, array_size)?;
 
                 // The array reference slot contains the base index into locals
-                let ref_slot = self.current_local_slot(base_slot as i32)?;
+                let ref_slot = self.current_local_slot(arg1)?;
                 let array_base = self.local_array_base(ref_slot, array_size)?;
                 self.locals[array_base + index] = value;
                 Ok(true)
@@ -575,13 +555,7 @@ impl<'a> Vm<'a> {
             Opcode::AllocArray | Opcode::ArrayNew => {
                 // In the standard VM, allocate contiguous slots in the locals array
                 // and push the base address
-                if arg1 < 0 {
-                    return Err((
-                        TrapCode::InvalidInstruction,
-                        format!("Negative array allocation size {}", arg1),
-                    ));
-                }
-                let size = arg1 as usize;
+                let size = Self::array_size(arg1)?;
                 // Use a simple bump allocation from the end of locals
                 let base = self.locals.len();
                 self.locals.extend(std::iter::repeat(0).take(size));
@@ -686,11 +660,36 @@ impl<'a> Vm<'a> {
         Ok(slot)
     }
 
-    fn validate_global_array_range(
+    fn global_slot(&self, raw_slot: i32) -> Result<usize, (TrapCode, String)> {
+        if raw_slot < 0 {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!("Negative global slot {}", raw_slot),
+            ));
+        }
+
+        let slot = raw_slot as usize;
+        if slot >= self.globals.len() {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Global slot {} out of range ({} slots)",
+                    slot,
+                    self.globals.len()
+                ),
+            ));
+        }
+
+        Ok(slot)
+    }
+
+    fn global_array_range(
         &self,
-        base_slot: usize,
-        array_size: usize,
-    ) -> Result<(), (TrapCode, String)> {
+        raw_base_slot: i32,
+        raw_array_size: i32,
+    ) -> Result<(usize, usize), (TrapCode, String)> {
+        let base_slot = self.global_slot(raw_base_slot)?;
+        let array_size = Self::array_size(raw_array_size)?;
         let end = base_slot.checked_add(array_size).ok_or((
             TrapCode::InvalidInstruction,
             "Global array range overflow".to_string(),
@@ -708,7 +707,40 @@ impl<'a> Vm<'a> {
             ));
         }
 
-        Ok(())
+        Ok((base_slot, array_size))
+    }
+
+    fn array_size(raw_size: i32) -> Result<usize, (TrapCode, String)> {
+        if raw_size < 0 {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!("Negative array size {}", raw_size),
+            ));
+        }
+
+        Ok(raw_size as usize)
+    }
+
+    fn array_index(raw_index: i64, array_size: usize) -> Result<usize, (TrapCode, String)> {
+        if raw_index < 0 {
+            return Err((
+                TrapCode::ArrayOutOfBounds,
+                format!(
+                    "Array index {} out of bounds (size {})",
+                    raw_index, array_size
+                ),
+            ));
+        }
+
+        let index = raw_index as usize;
+        if index >= array_size {
+            return Err((
+                TrapCode::ArrayOutOfBounds,
+                format!("Array index {} out of bounds (size {})", index, array_size),
+            ));
+        }
+
+        Ok(index)
     }
 
     fn local_array_base(
@@ -854,6 +886,49 @@ mod tests {
             vec![
                 Instruction::new(Opcode::LoadConst, 0, 0),
                 Instruction::new(Opcode::ArrayLoad, 999, 1),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_bad_global_slot_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadGlobal, Vm::MAX_GLOBALS as i32, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_negative_call_argument_count_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::Call, 0, -1),
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_negative_array_allocation_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::AllocArray, -1, 0),
                 Instruction::new(Opcode::Return, 0, 0),
             ],
             0,
