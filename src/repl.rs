@@ -1,22 +1,20 @@
-//! Interactive REPL with incremental JIT compilation.
+//! Interactive REPL with accumulated definitions.
 //!
 //! Features:
-//! - Incremental compilation (functions compiled on first call)
-//! - JIT hot path detection (frequently called functions get JIT'd)
+//! - Reparse/recompile accumulated definitions for each expression
 //! - Live statistics display
 //! - Expression evaluation mode
 
+use crate::compiler::Compiler;
+use crate::jit::ExecutableMemory;
 use crate::lexer::Lexer;
+use crate::optimizer::Optimizer;
 use crate::parser::Parser;
 use crate::sema::SemanticAnalyzer;
-use crate::compiler::Compiler;
 use crate::vm::Vm;
-use crate::optimizer::Optimizer;
-use crate::jit::{JitCompiler, ExecutableMemory, MachineCode, Reg};
-use crate::compiler::{CompiledProgram, Opcode, Instruction, FunctionInfo};
 
 use std::collections::HashMap;
-use std::io::{self, Write, BufRead};
+use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
 /// JIT compilation tier
@@ -143,10 +141,10 @@ impl Repl {
     /// Handle REPL commands
     fn handle_command(&mut self, cmd: &str) -> Result<bool, String> {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
-        
+
         match parts.get(0).map(|s| *s) {
             Some(":quit") | Some(":q") => Ok(false),
-            
+
             Some(":help") | Some(":h") => {
                 println!("Commands:");
                 println!("  :help, :h         Show this help");
@@ -164,23 +162,23 @@ impl Repl {
                 println!("  func f() {{ }}     Define function");
                 Ok(true)
             }
-            
+
             Some(":stats") => {
                 self.show_stats();
                 Ok(true)
             }
-            
+
             Some(":functions") => {
                 self.show_functions();
                 Ok(true)
             }
-            
+
             Some(":globals") => {
                 println!("Globals source:");
                 println!("{}", self.globals_source);
                 Ok(true)
             }
-            
+
             Some(":clear") => {
                 self.globals_source.clear();
                 self.functions_source.clear();
@@ -189,13 +187,13 @@ impl Repl {
                 println!("Cleared all definitions.");
                 Ok(true)
             }
-            
+
             Some(":verbose") => {
                 self.verbose = !self.verbose;
                 println!("Verbose mode: {}", if self.verbose { "on" } else { "off" });
                 Ok(true)
             }
-            
+
             Some(":jit") => {
                 if let Some(n) = parts.get(1).and_then(|s| s.parse().ok()) {
                     self.jit_threshold = n;
@@ -205,7 +203,7 @@ impl Repl {
                 }
                 Ok(true)
             }
-            
+
             _ => Err(format!("Unknown command: {}", cmd)),
         }
     }
@@ -216,12 +214,12 @@ impl Repl {
         if input.trim_start().starts_with("func ") {
             return self.add_function(input);
         }
-        
+
         // Check if it's a global variable definition
         if input.trim_start().starts_with("int ") || input.trim_start().starts_with("bool ") {
             return self.add_global(input);
         }
-        
+
         // Otherwise, evaluate as expression
         self.eval_expression(input)
     }
@@ -229,44 +227,59 @@ impl Repl {
     /// Add a function definition
     fn add_function(&mut self, input: &str) -> Result<(), String> {
         // Parse to validate
-        let source = format!("{}\n{}\n{}", self.globals_source, self.functions_source, input);
-        
+        let source = format!(
+            "{}\n{}\n{}",
+            self.globals_source, self.functions_source, input
+        );
+
         let mut lexer = Lexer::new(&source);
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
         let _program = parser.parse().map_err(|e| format!("Parse error: {}", e))?;
-        
+
         // Add to accumulated source
         self.functions_source.push_str(input);
         self.functions_source.push('\n');
-        
+
         // Extract function name for stats
-        if let Some(name) = input.split('(').next().and_then(|s| s.split_whitespace().last()) {
-            self.function_stats.entry(name.to_string())
+        if let Some(name) = input
+            .split('(')
+            .next()
+            .and_then(|s| s.split_whitespace().last())
+        {
+            self.function_stats
+                .entry(name.to_string())
                 .or_insert_with(FunctionStats::default);
             println!("Defined function: {}", name);
         }
-        
+
         Ok(())
     }
 
     /// Add a global variable definition
     fn add_global(&mut self, input: &str) -> Result<(), String> {
         // Ensure it ends with semicolon
-        let input = if input.ends_with(';') { input.to_string() } else { format!("{};", input) };
-        
+        let input = if input.ends_with(';') {
+            input.to_string()
+        } else {
+            format!("{};", input)
+        };
+
         // Parse to validate
-        let source = format!("{}\n{}\nfunc main() {{ return 0; }}", self.globals_source, input);
-        
+        let source = format!(
+            "{}\n{}\nfunc main() {{ return 0; }}",
+            self.globals_source, input
+        );
+
         let mut lexer = Lexer::new(&source);
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
         let _program = parser.parse().map_err(|e| format!("Parse error: {}", e))?;
-        
+
         // Add to accumulated source
         self.globals_source.push_str(&input);
         self.globals_source.push('\n');
-        
+
         println!("Defined global variable");
         Ok(())
     }
@@ -274,45 +287,47 @@ impl Repl {
     /// Evaluate an expression
     fn eval_expression(&mut self, expr: &str) -> Result<(), String> {
         self.eval_count += 1;
-        
+
         // Wrap expression in a main function
         let source = format!(
             "{}\n{}\nfunc main() {{ return {}; }}",
-            self.globals_source,
-            self.functions_source,
-            expr
+            self.globals_source, self.functions_source, expr
         );
-        
+
         let start = Instant::now();
-        
+
         // Compile
         let mut lexer = Lexer::new(&source);
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
         let program = parser.parse().map_err(|e| format!("Parse error: {}", e))?;
-        
+
         let mut analyzer = SemanticAnalyzer::new();
         analyzer.analyze(&program).map_err(|errors| {
-            errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
         })?;
-        
+
         let (compiled, _) = Compiler::new().compile(&program);
-        
+
         // Optimize
         let mut optimizer = Optimizer::new();
         let optimized = optimizer.optimize(compiled);
-        
+
         let compile_time = start.elapsed();
-        
+
         // Execute
         let exec_start = Instant::now();
         let mut vm = Vm::new(&optimized);
         let result = vm.run();
         let exec_time = exec_start.elapsed();
-        
+
         if result.success {
             println!("= {}", result.return_value);
-            
+
             if self.verbose {
                 println!(
                     "  Compile: {:.3}ms, Execute: {:.3}ms ({} cycles)",
@@ -328,7 +343,7 @@ impl Repl {
                 result.trap_code, result.pc, result.cycles
             );
         }
-        
+
         Ok(())
     }
 
@@ -338,7 +353,7 @@ impl Repl {
         println!("Expressions evaluated: {}", self.eval_count);
         println!("JIT threshold: {} calls", self.jit_threshold);
         println!();
-        
+
         if !self.function_stats.is_empty() {
             println!("Function statistics:");
             for (name, stats) in &self.function_stats {
@@ -376,22 +391,26 @@ impl Default for Repl {
 /// Run expression evaluation mode (single expression)
 pub fn eval(expr: &str) -> Result<i64, String> {
     let source = format!("func main() {{ return {}; }}", expr);
-    
+
     let mut lexer = Lexer::new(&source);
     let tokens = lexer.tokenize();
     let mut parser = Parser::new(tokens);
     let program = parser.parse().map_err(|e| format!("Parse error: {}", e))?;
-    
+
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(&program).map_err(|errors| {
-        errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
+        errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     })?;
-    
+
     let (compiled, _) = Compiler::new().compile(&program);
-    
+
     let mut vm = Vm::new(&compiled);
     let result = vm.run();
-    
+
     if result.success {
         Ok(result.return_value)
     } else {
@@ -415,11 +434,11 @@ mod tests {
         // Use ternary-style if expressions that return int
         // The eval wraps in: func main() { return <expr>; }
         // So we need to make the expression return int
-        
+
         // Test with explicit int values
         let r1 = eval("1 + 1").unwrap();
         assert_eq!(r1, 2);
-        
+
         // Comparisons produce 0 or 1 which are ints - should work
         // Actually the sema might reject bool returns, let's skip this test
     }

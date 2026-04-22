@@ -7,11 +7,11 @@
 //! - Calling conventions (System V AMD64 ABI)
 //! - Executable memory management (mmap/mprotect)
 
-use crate::compiler::{CompiledProgram, Opcode, Instruction};
+use crate::compiler::{CompiledProgram, Instruction, Opcode};
 use std::collections::HashMap;
 
 #[cfg(target_os = "linux")]
-use libc::{mmap, mprotect, munmap, PROT_EXEC, PROT_READ, PROT_WRITE, MAP_PRIVATE, MAP_ANONYMOUS};
+use libc::{mmap, mprotect, munmap, MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 /// x86-64 registers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,9 +99,15 @@ impl MachineCode {
     /// REX prefix for 64-bit operations
     fn rex(&mut self, w: bool, r: Reg, b: Reg) {
         let mut rex = 0x40u8;
-        if w { rex |= 0x08; }  // W bit for 64-bit operand
-        if (r as u8) >= 8 { rex |= 0x04; }  // R bit for extended reg
-        if (b as u8) >= 8 { rex |= 0x01; }  // B bit for extended reg
+        if w {
+            rex |= 0x08;
+        } // W bit for 64-bit operand
+        if (r as u8) >= 8 {
+            rex |= 0x04;
+        } // R bit for extended reg
+        if (b as u8) >= 8 {
+            rex |= 0x01;
+        } // B bit for extended reg
         if rex != 0x40 {
             self.emit_u8(rex);
         }
@@ -491,7 +497,7 @@ impl ExecutableMemory {
     }
 
     /// Get function pointer to the start of the code
-    pub fn as_fn<T>(&self) -> T 
+    pub fn as_fn<T>(&self) -> T
     where
         T: Copy,
     {
@@ -563,13 +569,15 @@ impl JitCompiler {
         }
 
         // Find main function entry
-        let main_entry_pc = program.functions.get(&program.main_func_id)
+        let main_entry_pc = program
+            .functions
+            .get(&program.main_func_id)
             .map(|f| f.entry_pc)
             .unwrap_or(0);
 
         // Check if we have multiple functions (calls)
         let has_calls = program.functions.len() > 1;
-        
+
         if has_calls {
             // For programs with function calls, fall back to interpreter
             // (Full function call support would require a more complex implementation)
@@ -582,13 +590,13 @@ impl JitCompiler {
         // Compile only main function (starting from its entry PC)
         for pc in main_entry_pc..program.instructions.len() {
             let instr = &program.instructions[pc];
-            
+
             // Record where this PC starts in machine code
             self.pc_to_offset.insert(pc, self.code.pos());
             self.code.label(pc);
-            
+
             self.compile_instruction(instr, pc, program);
-            
+
             // Stop if we hit a Return (end of main)
             if matches!(instr.opcode, Opcode::Return) {
                 break;
@@ -643,8 +651,8 @@ impl JitCompiler {
             }
 
             Opcode::Add => {
-                self.code.pop(Reg::Rcx);  // Right operand
-                self.code.pop(Reg::Rax);  // Left operand
+                self.code.pop(Reg::Rcx); // Right operand
+                self.code.pop(Reg::Rax); // Left operand
                 self.code.add(Reg::Rax, Reg::Rcx);
                 self.code.push(Reg::Rax);
             }
@@ -664,10 +672,10 @@ impl JitCompiler {
             }
 
             Opcode::Div => {
-                self.code.pop(Reg::Rcx);  // Divisor
-                self.code.pop(Reg::Rax);  // Dividend
-                self.code.cqo();           // Sign-extend RAX into RDX:RAX
-                self.code.idiv(Reg::Rcx);  // RAX = quotient
+                self.code.pop(Reg::Rcx); // Divisor
+                self.code.pop(Reg::Rax); // Dividend
+                self.code.cqo(); // Sign-extend RAX into RDX:RAX
+                self.code.idiv(Reg::Rcx); // RAX = quotient
                 self.code.push(Reg::Rax);
             }
 
@@ -759,12 +767,12 @@ impl JitCompiler {
             }
 
             Opcode::Return => {
-                self.code.pop(Reg::Rax);  // Return value in RAX
+                self.code.pop(Reg::Rax); // Return value in RAX
                 self.emit_epilogue();
             }
 
             Opcode::Pop => {
-                self.code.pop(Reg::Rax);  // Discard
+                self.code.pop(Reg::Rax); // Discard
             }
 
             Opcode::Dup => {
@@ -780,20 +788,20 @@ impl JitCompiler {
 
             Opcode::And => {
                 // Logical AND
-                self.code.pop(Reg::Rcx);  // Right
-                self.code.pop(Reg::Rax);  // Left
+                self.code.pop(Reg::Rcx); // Right
+                self.code.pop(Reg::Rax); // Left
                 self.code.test(Reg::Rax, Reg::Rax);
-                self.code.setne(Reg::Rax);  // RAX = (left != 0) ? 1 : 0
+                self.code.setne(Reg::Rax); // RAX = (left != 0) ? 1 : 0
                 self.code.test(Reg::Rcx, Reg::Rcx);
-                self.code.setne(Reg::Rcx);  // RCX = (right != 0) ? 1 : 0
+                self.code.setne(Reg::Rcx); // RCX = (right != 0) ? 1 : 0
                 self.code.emit(&[0x48, 0x21, 0xC8]); // and rax, rcx
                 self.code.push(Reg::Rax);
             }
 
             Opcode::Or => {
                 // Logical OR
-                self.code.pop(Reg::Rcx);  // Right
-                self.code.pop(Reg::Rax);  // Left
+                self.code.pop(Reg::Rcx); // Right
+                self.code.pop(Reg::Rax); // Left
                 self.code.emit(&[0x48, 0x09, 0xC8]); // or rax, rcx
                 self.code.test(Reg::Rax, Reg::Rax);
                 self.code.setne(Reg::Rax);
@@ -818,10 +826,10 @@ impl JitCompiler {
             Opcode::ArrayLoad => {
                 // Global array: base at RBP - 512 - base_slot*8, indexed by top of stack
                 let base_slot = instr.arg1;
-                self.code.pop(Reg::Rcx);  // Index
-                // Calculate address: RBP - 512 - (base_slot + index) * 8
+                self.code.pop(Reg::Rcx); // Index
+                                         // Calculate address: RBP - 512 - (base_slot + index) * 8
                 self.code.mov_imm32(Reg::Rax, base_slot);
-                self.code.add(Reg::Rax, Reg::Rcx);  // RAX = base_slot + index
+                self.code.add(Reg::Rax, Reg::Rcx); // RAX = base_slot + index
                 self.code.emit(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3 (multiply by 8)
                 self.code.neg(Reg::Rax);
                 self.code.sub_imm(Reg::Rax, 512);
@@ -833,9 +841,9 @@ impl JitCompiler {
             Opcode::ArrayStore => {
                 // Global array store
                 let base_slot = instr.arg1;
-                self.code.pop(Reg::Rdx);  // Value
-                self.code.pop(Reg::Rcx);  // Index
-                // Calculate address
+                self.code.pop(Reg::Rdx); // Value
+                self.code.pop(Reg::Rcx); // Index
+                                         // Calculate address
                 self.code.mov_imm32(Reg::Rax, base_slot);
                 self.code.add(Reg::Rax, Reg::Rcx);
                 self.code.emit(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3
@@ -848,8 +856,8 @@ impl JitCompiler {
             Opcode::LocalArrayLoad => {
                 // Local array: load array base from local slot, then index
                 let base_slot = instr.arg1;
-                self.code.pop(Reg::Rcx);  // Index
-                // Load array base address from local
+                self.code.pop(Reg::Rcx); // Index
+                                         // Load array base address from local
                 let slot_offset = -(8 + base_slot as i32 * 8);
                 self.code.mov_load(Reg::Rax, Reg::Rbp, slot_offset);
                 // Add index * 8
@@ -863,9 +871,9 @@ impl JitCompiler {
             Opcode::LocalArrayStore => {
                 // Local array store
                 let base_slot = instr.arg1;
-                self.code.pop(Reg::Rdx);  // Value
-                self.code.pop(Reg::Rcx);  // Index
-                // Load array base address
+                self.code.pop(Reg::Rdx); // Value
+                self.code.pop(Reg::Rcx); // Index
+                                         // Load array base address
                 let slot_offset = -(8 + base_slot as i32 * 8);
                 self.code.mov_load(Reg::Rax, Reg::Rbp, slot_offset);
                 // Add index * 8
@@ -893,14 +901,14 @@ impl JitCompiler {
                 // Call the function (which will return with result in RAX)
                 let func_id = instr.arg1 as usize;
                 let _arg_count = instr.arg2 as usize;
-                
+
                 // Get the function's entry PC and call it
                 if let Some(&entry_pc) = self.func_entries.get(&func_id) {
                     // Call to label (will be patched)
                     self.code.emit_u8(0xE8); // call rel32
                     self.code.pending_jumps.push((self.code.pos(), entry_pc));
                     self.code.emit_i32(0);
-                    
+
                     // Clean up arguments from stack (they were pushed by caller)
                     // Actually, we keep the result which is in RAX, push it
                     // First, pop all the args we pushed
@@ -950,7 +958,7 @@ mod tests {
     #[test]
     fn test_machine_code_generation() {
         let mut code = MachineCode::new();
-        
+
         // mov rax, 42
         code.mov_imm32(Reg::Rax, 42);
         // ret
@@ -963,7 +971,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_jit_simple_return() {
         let mut code = MachineCode::new();
-        
+
         // Simple function that returns 42
         code.push(Reg::Rbp);
         code.mov(Reg::Rbp, Reg::Rsp);
@@ -974,7 +982,7 @@ mod tests {
 
         let mem = ExecutableMemory::new(code.code()).unwrap();
         let func: extern "C" fn() -> i64 = mem.as_fn();
-        
+
         assert_eq!(func(), 42);
     }
 
@@ -982,7 +990,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_jit_add() {
         let mut code = MachineCode::new();
-        
+
         // Function that adds two arguments (in RDI and RSI)
         code.push(Reg::Rbp);
         code.mov(Reg::Rbp, Reg::Rsp);
@@ -994,7 +1002,7 @@ mod tests {
 
         let mem = ExecutableMemory::new(code.code()).unwrap();
         let func: extern "C" fn(i64, i64) -> i64 = mem.as_fn();
-        
+
         assert_eq!(func(10, 32), 42);
         assert_eq!(func(-5, 15), 10);
     }

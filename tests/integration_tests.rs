@@ -1,12 +1,16 @@
 //! Integration tests for MiniLang VM
-//! 
+//!
 //! Tests match the Python implementation behavior exactly.
 
 use minilang::{run, TrapCode};
 
 fn run_expect(source: &str, expected: i64) {
     let result = run(source).expect("compilation failed");
-    assert!(result.success, "VM trap: {} ({:?})", result.trap_message, result.trap_code);
+    assert!(
+        result.success,
+        "VM trap: {} ({:?})",
+        result.trap_message, result.trap_code
+    );
     assert_eq!(result.return_value, expected, "wrong return value");
 }
 
@@ -155,6 +159,18 @@ fn test_not() {
     run_expect("func main() { if (!1) { return 1; } return 0; }", 0);
 }
 
+#[test]
+fn test_logical_short_circuit_avoids_rhs_traps() {
+    run_expect(
+        "func main() { if (0 && (10 / 0)) { return 1; } return 2; }",
+        2,
+    );
+    run_expect(
+        "func main() { if (1 || (10 / 0)) { return 3; } return 4; }",
+        3,
+    );
+}
+
 // ============================================================================
 // Variables
 // ============================================================================
@@ -184,6 +200,11 @@ fn test_global_var_update() {
     run_expect("int g = 100; func main() { g = g + 1; return g; }", 101);
 }
 
+#[test]
+fn test_global_initializer_expression() {
+    run_expect("int g = 40 + 2; func main() { return g; }", 42);
+}
+
 // ============================================================================
 // Control Flow
 // ============================================================================
@@ -207,7 +228,7 @@ fn test_if_else() {
 fn test_while_loop() {
     run_expect(
         "func main() { int i = 0; int s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }",
-        45
+        45,
     );
 }
 
@@ -219,7 +240,7 @@ fn test_while_loop() {
 fn test_function_call() {
     run_expect(
         "func add(int a, int b) { return a + b; } func main() { return add(3, 4); }",
-        7
+        7,
     );
 }
 
@@ -250,7 +271,10 @@ fn test_array_basic() {
 
 #[test]
 fn test_array_multiple() {
-    run_expect("func main() { int a[5]; a[0] = 10; a[1] = 20; return a[0] + a[1]; }", 30);
+    run_expect(
+        "func main() { int a[5]; a[0] = 10; a[1] = 20; return a[0] + a[1]; }",
+        30,
+    );
 }
 
 #[test]
@@ -277,13 +301,24 @@ fn test_trap_undefined_local() {
 
 #[test]
 fn test_trap_array_oob() {
-    run_expect_trap("func main() { int a[5]; return a[10]; }", TrapCode::ArrayOutOfBounds);
+    run_expect_trap(
+        "func main() { int a[5]; return a[10]; }",
+        TrapCode::ArrayOutOfBounds,
+    );
+}
+
+#[test]
+fn test_trap_array_negative_index() {
+    run_expect_trap(
+        "func main() { int a[5]; return a[-1]; }",
+        TrapCode::ArrayOutOfBounds,
+    );
 }
 
 #[test]
 fn test_trap_stack_overflow() {
     run_expect_trap(
         "func inf(int n) { return inf(n + 1); } func main() { return inf(0); }",
-        TrapCode::StackOverflow
+        TrapCode::StackOverflow,
     );
 }

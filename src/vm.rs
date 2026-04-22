@@ -3,20 +3,20 @@
 //! A stack-based VM that executes bytecode instructions.
 //! Used as fallback when JIT is not available and for debugging.
 
-use crate::compiler::{CompiledProgram, Opcode, FunctionInfo};
 use crate::alloc::BumpAllocator;
+use crate::compiler::{CompiledProgram, FunctionInfo, Opcode};
 use crate::gc::GarbageCollector;
 
 /// Trap codes for runtime errors (matching Python spec exactly)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrapCode {
     None = 0,
-    DivideByZero = 1,       // TRAP_DIV_ZERO
-    UndefinedLocal = 2,     // TRAP_UNDEFINED_LOCAL  
-    ArrayOutOfBounds = 3,   // TRAP_ARRAY_OOB
-    StackOverflow = 4,      // TRAP_STACK_OVERFLOW
-    CycleLimit = 5,         // TRAP_CYCLE_LIMIT
-    UndefinedFunction = 6,  // TRAP_UNDEFINED_FUNCTION
+    DivideByZero = 1,      // TRAP_DIV_ZERO
+    UndefinedLocal = 2,    // TRAP_UNDEFINED_LOCAL
+    ArrayOutOfBounds = 3,  // TRAP_ARRAY_OOB
+    StackOverflow = 4,     // TRAP_STACK_OVERFLOW
+    CycleLimit = 5,        // TRAP_CYCLE_LIMIT
+    UndefinedFunction = 6, // TRAP_UNDEFINED_FUNCTION
     StackUnderflow = 7,
     InvalidInstruction = 8,
 }
@@ -84,7 +84,9 @@ impl<'a> Vm<'a> {
     /// Create a new VM for the given program
     pub fn new(program: &'a CompiledProgram) -> Self {
         // Calculate total globals needed (max 256)
-        let globals_size = program.globals.values()
+        let globals_size = program
+            .globals
+            .values()
             .map(|g| if g.is_array { g.array_size } else { 1 })
             .sum::<usize>()
             .max(Self::MAX_GLOBALS);
@@ -101,7 +103,7 @@ impl<'a> Vm<'a> {
             output: Vec::new(),
             debug: false,
             allocator: BumpAllocator::new(1024 * 1024), // 1MB
-            gc: GarbageCollector::new(512 * 1024), // 512KB threshold
+            gc: GarbageCollector::new(512 * 1024),      // 512KB threshold
         }
     }
 
@@ -179,7 +181,11 @@ impl<'a> Vm<'a> {
                 let stack_before: Vec<String> = self.stack.iter().map(|v| v.to_string()).collect();
                 eprintln!(
                     "[cycle={} pc={}] EXEC {:?} {} {} | stack=[{}]",
-                    self.cycles, self.pc, instr.opcode, instr.arg1, instr.arg2,
+                    self.cycles,
+                    self.pc,
+                    instr.opcode,
+                    instr.arg1,
+                    instr.arg2,
                     stack_before.join(", ")
                 );
             }
@@ -217,10 +223,10 @@ impl<'a> Vm<'a> {
     }
 
     fn execute_instruction(
-        &mut self, 
-        opcode: Opcode, 
-        arg1: i32, 
-        arg2: i32
+        &mut self,
+        opcode: Opcode,
+        arg1: i32,
+        arg2: i32,
     ) -> Result<bool, (TrapCode, String)> {
         match opcode {
             Opcode::LoadConst => {
@@ -233,7 +239,10 @@ impl<'a> Vm<'a> {
                 let slot = frame.base_ptr + arg1 as usize;
                 let value = self.locals[slot];
                 if value == i64::MIN {
-                    return Err((TrapCode::UndefinedLocal, format!("Undefined local at slot {}", arg1)));
+                    return Err((
+                        TrapCode::UndefinedLocal,
+                        format!("Undefined local at slot {}", arg1),
+                    ));
                 }
                 self.stack.push(value);
                 Ok(true)
@@ -387,20 +396,30 @@ impl<'a> Vm<'a> {
                 let func_id = arg1 as usize;
                 let arg_count = arg2 as usize;
 
-                let func = self.program.functions.get(&func_id)
-                    .ok_or((TrapCode::UndefinedFunction, format!("Undefined function {}", func_id)))?
+                let func = self
+                    .program
+                    .functions
+                    .get(&func_id)
+                    .ok_or((
+                        TrapCode::UndefinedFunction,
+                        format!("Undefined function {}", func_id),
+                    ))?
                     .clone();
 
                 // Check stack overflow (max 100 frames per spec)
                 if self.call_stack.len() >= Self::MAX_FRAMES {
-                    return Err((TrapCode::StackOverflow, format!(
-                        "Call stack overflow (max {} frames)", Self::MAX_FRAMES
-                    )));
+                    return Err((
+                        TrapCode::StackOverflow,
+                        format!("Call stack overflow (max {} frames)", Self::MAX_FRAMES),
+                    ));
                 }
 
                 // Set up new frame
-                let new_base = self.call_stack.last().map(|f| f.base_ptr).unwrap_or(0) 
-                    + self.program.functions.get(&self.call_stack.last().map(|f| f.func_id).unwrap_or(0))
+                let new_base = self.call_stack.last().map(|f| f.base_ptr).unwrap_or(0)
+                    + self
+                        .program
+                        .functions
+                        .get(&self.call_stack.last().map(|f| f.func_id).unwrap_or(0))
                         .map(|f| f.local_count)
                         .unwrap_or(0);
 
@@ -446,8 +465,10 @@ impl<'a> Vm<'a> {
                 let index = self.pop()? as usize;
 
                 if index >= array_size {
-                    return Err((TrapCode::ArrayOutOfBounds, 
-                        format!("Array index {} out of bounds (size {})", index, array_size)));
+                    return Err((
+                        TrapCode::ArrayOutOfBounds,
+                        format!("Array index {} out of bounds (size {})", index, array_size),
+                    ));
                 }
 
                 // For global arrays
@@ -463,8 +484,10 @@ impl<'a> Vm<'a> {
                 let index = self.pop()? as usize;
 
                 if index >= array_size {
-                    return Err((TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, array_size)));
+                    return Err((
+                        TrapCode::ArrayOutOfBounds,
+                        format!("Array index {} out of bounds (size {})", index, array_size),
+                    ));
                 }
 
                 // For global arrays
@@ -478,8 +501,10 @@ impl<'a> Vm<'a> {
                 let index = self.pop()? as usize;
 
                 if index >= array_size {
-                    return Err((TrapCode::ArrayOutOfBounds, 
-                        format!("Array index {} out of bounds (size {})", index, array_size)));
+                    return Err((
+                        TrapCode::ArrayOutOfBounds,
+                        format!("Array index {} out of bounds (size {})", index, array_size),
+                    ));
                 }
 
                 let frame = self.call_stack.last().unwrap();
@@ -497,8 +522,10 @@ impl<'a> Vm<'a> {
                 let index = self.pop()? as usize;
 
                 if index >= array_size {
-                    return Err((TrapCode::ArrayOutOfBounds,
-                        format!("Array index {} out of bounds (size {})", index, array_size)));
+                    return Err((
+                        TrapCode::ArrayOutOfBounds,
+                        format!("Array index {} out of bounds (size {})", index, array_size),
+                    ));
                 }
 
                 let frame = self.call_stack.last().unwrap();
@@ -533,7 +560,9 @@ impl<'a> Vm<'a> {
             }
 
             Opcode::Dup => {
-                let value = *self.stack.last()
+                let value = *self
+                    .stack
+                    .last()
                     .ok_or((TrapCode::StackUnderflow, "Stack underflow".to_string()))?;
                 self.stack.push(value);
                 Ok(true)
@@ -548,13 +577,15 @@ impl<'a> Vm<'a> {
             }
 
             // ArrayNew is for GcVm only
-            Opcode::ArrayNew => {
-                Err((TrapCode::InvalidInstruction, format!("GC-only opcode: {:?}", opcode)))
-            }
+            Opcode::ArrayNew => Err((
+                TrapCode::InvalidInstruction,
+                format!("GC-only opcode: {:?}", opcode),
+            )),
 
-            _ => {
-                Err((TrapCode::InvalidInstruction, format!("Unknown opcode: {:?}", opcode)))
-            }
+            _ => Err((
+                TrapCode::InvalidInstruction,
+                format!("Unknown opcode: {:?}", opcode),
+            )),
         }
     }
 
@@ -571,7 +602,8 @@ impl<'a> Vm<'a> {
 
     #[inline(always)]
     fn pop(&mut self) -> Result<i64, (TrapCode, String)> {
-        self.stack.pop()
+        self.stack
+            .pop()
             .ok_or((TrapCode::StackUnderflow, "Stack underflow".to_string()))
     }
 
@@ -622,7 +654,9 @@ mod tests {
 
     #[test]
     fn test_function_call() {
-        let result = compile_and_run("func add(int a, int b) { return a + b; } func main() { return add(3, 4); }");
+        let result = compile_and_run(
+            "func add(int a, int b) { return a + b; } func main() { return add(3, 4); }",
+        );
         assert!(result.success);
         assert_eq!(result.return_value, 7);
     }

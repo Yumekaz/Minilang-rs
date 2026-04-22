@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features
+
+      - name: Test
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Release Build
+        run: cargo build --locked --release
+
+      - name: Build Benchmarks
+        run: cargo bench --no-run --locked
+
+      - name: Smoke Test
+        run: cargo run --locked --release -- examples/hello.lang
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: MSVC Developer Shell
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked

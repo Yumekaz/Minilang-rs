@@ -11,7 +11,7 @@ This document contains everything needed to rebuild MiniLang from scratch.
 ```rust
 pub enum TokenKind {
     // Literals
-    IntLiteral(i64),
+    IntLiteral(i32),
     True,
     False,
     

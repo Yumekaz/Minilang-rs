@@ -42,7 +42,13 @@ impl Value {
     pub fn to_i64(&self) -> i64 {
         match self {
             Value::Int(i) => *i,
-            Value::Bool(b) => if *b { 1 } else { 0 },
+            Value::Bool(b) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             Value::Array(arr) => arr.ptr.as_ptr() as i64, // Pointer as int
             Value::Null => 0,
         }
@@ -106,24 +112,24 @@ impl GcArray {
         let header_size = std::mem::size_of::<ArrayHeader>();
         let data_size = len * std::mem::size_of::<i64>();
         let total_size = header_size + data_size;
-        
+
         let raw = gc.alloc(total_size, TypeTag::IntArray)?;
-        
+
         // Initialize header
         let header_ptr = raw.as_ptr() as *mut ArrayHeader;
         unsafe {
             (*header_ptr).len = len;
             (*header_ptr).cap = len;
         }
-        
+
         // Get data pointer (after header)
         let data_ptr = unsafe { raw.as_ptr().add(header_size) as *mut i64 };
-        
+
         // Zero-initialize the array
         unsafe {
             std::ptr::write_bytes(data_ptr, 0, len);
         }
-        
+
         Some(Self {
             ptr: NonNull::new(data_ptr).unwrap(),
             len,
@@ -135,9 +141,7 @@ impl GcArray {
         if index >= self.len {
             return None;
         }
-        unsafe {
-            Some(*self.ptr.as_ptr().add(index))
-        }
+        unsafe { Some(*self.ptr.as_ptr().add(index)) }
     }
 
     /// Set element at index
@@ -153,25 +157,19 @@ impl GcArray {
 
     /// Get as slice
     pub fn as_slice(&self) -> &[i64] {
-        unsafe {
-            std::slice::from_raw_parts(self.ptr.as_ptr(), self.len)
-        }
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
     /// Get as mutable slice
     pub fn as_mut_slice(&mut self) -> &mut [i64] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len)
-        }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
     /// Get the base pointer for GC root tracking
     pub fn base_ptr(&self) -> *mut u8 {
         // Go back to the header
         let header_size = std::mem::size_of::<ArrayHeader>();
-        unsafe {
-            (self.ptr.as_ptr() as *mut u8).sub(header_size)
-        }
+        unsafe { (self.ptr.as_ptr() as *mut u8).sub(header_size) }
     }
 }
 
@@ -222,9 +220,7 @@ impl ValueStack {
 
     /// Get all GC-managed pointers for root tracking
     pub fn gc_roots(&self) -> Vec<*mut u8> {
-        self.values.iter()
-            .filter_map(|v| v.gc_ptr())
-            .collect()
+        self.values.iter().filter_map(|v| v.gc_ptr()).collect()
     }
 
     /// Clear the stack
@@ -275,7 +271,8 @@ impl LocalFrame {
 
     /// Get GC roots from this frame
     pub fn gc_roots(&self) -> Vec<*mut u8> {
-        self.values.iter()
+        self.values
+            .iter()
             .zip(self.init_flags.iter())
             .filter(|(_, init)| **init)
             .filter_map(|(v, _)| v.gc_ptr())
@@ -316,9 +313,7 @@ impl GlobalStore {
 
     /// Get GC roots
     pub fn gc_roots(&self) -> Vec<*mut u8> {
-        self.values.iter()
-            .filter_map(|v| v.gc_ptr())
-            .collect()
+        self.values.iter().filter_map(|v| v.gc_ptr()).collect()
     }
 }
 
@@ -329,19 +324,19 @@ mod tests {
     #[test]
     fn test_gc_array() {
         let mut gc = GarbageCollector::new(1024 * 1024);
-        
+
         let mut arr = GcArray::new(&mut gc, 10).unwrap();
-        
+
         // Set values
         for i in 0..10 {
             assert!(arr.set(i, (i * i) as i64));
         }
-        
+
         // Get values
         for i in 0..10 {
             assert_eq!(arr.get(i), Some((i * i) as i64));
         }
-        
+
         // Out of bounds
         assert_eq!(arr.get(10), None);
         assert!(!arr.set(10, 0));
@@ -350,18 +345,18 @@ mod tests {
     #[test]
     fn test_value_stack() {
         let mut stack = ValueStack::new(100);
-        
+
         stack.push(Value::Int(42));
         stack.push(Value::Bool(true));
-        
+
         assert_eq!(stack.len(), 2);
-        
+
         if let Some(Value::Bool(b)) = stack.pop() {
             assert!(b);
         } else {
             panic!("expected bool");
         }
-        
+
         if let Some(Value::Int(i)) = stack.pop() {
             assert_eq!(i, 42);
         } else {
@@ -372,10 +367,10 @@ mod tests {
     #[test]
     fn test_local_frame() {
         let mut frame = LocalFrame::new(5, 0, 0);
-        
+
         // Uninitialized read should fail
         assert_eq!(frame.get(0), None);
-        
+
         // Set and read
         frame.set(0, Value::Int(42));
         assert_eq!(frame.get(0), Some(Value::Int(42)));

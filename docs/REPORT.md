@@ -10,7 +10,7 @@ This is a complete rewrite of the MiniLang compiler from Python to Rust, with ad
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Lexer | ✅ | Zero-copy, handles all tokens |
+| Lexer | ✅ | Single-pass lexer, handles all tokens |
 | Parser | ✅ | Recursive descent, no generators |
 | AST | ✅ | Rust enums instead of dataclasses |
 | Semantic Analyzer | ✅ | Scope, types, main check |
@@ -96,7 +96,7 @@ Optimization Stats:
 ### 4. Interactive REPL (`src/repl.rs`)
 
 **Features:**
-- Incremental compilation
+- Stateful expression evaluation over accumulated definitions
 - Expression evaluation
 - Function definition persistence
 - Statistics tracking
@@ -207,7 +207,7 @@ instruments -t "Time Profiler" ./target/release/minilang examples/bench.lang
 # Build
 cargo build --release
 
-# Run tests (74 total)
+# Run tests
 cargo test
 
 # Run with optimizations

@@ -2,18 +2,17 @@
 //!
 //! Run with: cargo bench
 //! Profile with: cargo bench -- --profile-time=5
-//! 
+//!
 //! For perf profiling:
 //!   cargo build --release
 //!   perf record -g ./target/release/minilang examples/fibonacci.lang --bench
 //!   perf report
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use minilang::{
-    Lexer, Parser, SemanticAnalyzer, Compiler, Vm,
-    BumpAllocator, FreeListAllocator, SlabAllocator,
-    GarbageCollector, TypeTag,
+    BumpAllocator, Compiler, FreeListAllocator, GarbageCollector, Lexer, Parser, SemanticAnalyzer,
+    SlabAllocator, TypeTag, Vm,
 };
 
 const SIMPLE_PROGRAM: &str = "func main() { return 42; }";
@@ -40,7 +39,7 @@ func main() {
 
 fn bench_lexer(c: &mut Criterion) {
     let mut group = c.benchmark_group("lexer");
-    
+
     group.bench_function("simple", |b| {
         b.iter(|| {
             let mut lexer = Lexer::new(black_box(SIMPLE_PROGRAM));
@@ -60,11 +59,11 @@ fn bench_lexer(c: &mut Criterion) {
 
 fn bench_parser(c: &mut Criterion) {
     let mut group = c.benchmark_group("parser");
-    
+
     // Pre-tokenize
     let mut lexer = Lexer::new(FIBONACCI);
     let tokens = lexer.tokenize();
-    
+
     group.bench_function("fibonacci", |b| {
         b.iter(|| {
             let mut parser = Parser::new(black_box(tokens.clone()));
@@ -77,7 +76,7 @@ fn bench_parser(c: &mut Criterion) {
 
 fn bench_full_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_pipeline");
-    
+
     group.bench_function("simple", |b| {
         b.iter(|| {
             let mut lexer = Lexer::new(SIMPLE_PROGRAM);

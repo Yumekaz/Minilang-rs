@@ -967,6 +967,6 @@ To rebuild this system from scratch:
 11. **Add GC VM** (GcValue tagged union, mark-sweep)
 12. **Add JIT** (x86-64 code generation, mmap executable)
 13. **Add CLI** (argument parsing, mode selection)
-14. **Add REPL** (incremental compilation loop)
+14. **Add REPL** (stateful loop over accumulated definitions)
 
 Each step is independently testable. The system is a pipeline where each stage consumes the output of the previous stage.

@@ -64,7 +64,7 @@ impl<T: ?Sized> GcPtr<T> {
     }
 
     /// Get a reference to the value
-    /// 
+    ///
     /// # Safety
     /// The GC must not have collected this object
     pub unsafe fn as_ref(&self) -> &T {
@@ -72,7 +72,7 @@ impl<T: ?Sized> GcPtr<T> {
     }
 
     /// Get a mutable reference to the value
-    /// 
+    ///
     /// # Safety
     /// The GC must not have collected this object
     pub unsafe fn as_mut(&mut self) -> &mut T {
@@ -172,7 +172,7 @@ impl GarbageCollector {
     pub fn alloc_int_array(&mut self, len: usize) -> Option<GcPtr<[i32]>> {
         let size = len * std::mem::size_of::<i32>();
         let ptr = self.alloc(size, TypeTag::IntArray)?;
-        
+
         // Zero-initialize
         unsafe {
             std::ptr::write_bytes(ptr.as_ptr(), 0, size);
@@ -232,7 +232,7 @@ impl GarbageCollector {
 
         // Get header
         let header = unsafe { (ptr as *mut GcHeader).sub(1) };
-        
+
         // Verify this is a valid GC object by checking if it's in our list
         if !self.is_gc_object(header) {
             return;
@@ -403,7 +403,7 @@ mod tests {
         let mut gc = GarbageCollector::new(1024 * 1024);
 
         let mut arr = gc.alloc_int_array(10).unwrap();
-        
+
         // Write to array
         unsafe {
             let slice = arr.as_mut();

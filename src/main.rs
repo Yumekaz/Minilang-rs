@@ -8,16 +8,12 @@ use std::process;
 use std::time::Instant;
 
 use minilang::{
-    Lexer, Parser, SemanticAnalyzer, Compiler, Vm,
-    compiler::disassemble,
-    JitCompiler,
-    Optimizer,
-    Repl,
-    GcVm,
+    compiler::disassemble, Compiler, GcVm, JitCompiler, Lexer, Optimizer, Parser, Repl,
+    SemanticAnalyzer, Vm,
 };
 
 fn print_usage() {
-    eprintln!("MiniLang Compiler v0.2.0");
+    eprintln!("MiniLang Compiler v{}", env!("CARGO_PKG_VERSION"));
     eprintln!();
     eprintln!("Usage: minilang [OPTIONS] [file.lang]");
     eprintln!();
@@ -39,7 +35,7 @@ fn print_usage() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() < 2 {
         print_usage();
         process::exit(1);
@@ -80,7 +76,7 @@ fn main() {
                     process::exit(1);
                 }
             }
-            "--no-color" => { /* no-op for compatibility */ },
+            "--no-color" => { /* no-op for compatibility */ }
             "--help" | "-h" => {
                 print_usage();
                 process::exit(0);
@@ -208,10 +204,7 @@ fn main() {
 
     // Execution
     let exec_start = Instant::now();
-    
-    // Track if JIT succeeded
-    let mut jit_executed = false;
-    
+
     if use_jit {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
@@ -221,26 +214,32 @@ fn main() {
                     let func: extern "C" fn() -> i64 = exec_mem.as_fn();
                     let result = func();
                     let exec_time = exec_start.elapsed();
-                    
+
                     if bench {
                         println!();
                         println!("=== Timing (JIT) ===");
                         println!("  Lexer:     {:>10.3}ms", lex_time.as_secs_f64() * 1000.0);
                         println!("  Parser:    {:>10.3}ms", parse_time.as_secs_f64() * 1000.0);
                         println!("  Semantic:  {:>10.3}ms", sema_time.as_secs_f64() * 1000.0);
-                        println!("  Compile:   {:>10.3}ms", compile_time.as_secs_f64() * 1000.0);
+                        println!(
+                            "  Compile:   {:>10.3}ms",
+                            compile_time.as_secs_f64() * 1000.0
+                        );
                         if use_opt {
                             println!("  Optimize:  {:>10.3}ms", opt_time.as_secs_f64() * 1000.0);
                         }
                         println!("  JIT Exec:  {:>10.3}ms", exec_time.as_secs_f64() * 1000.0);
-                        println!("  Total:     {:>10.3}ms", total_start.elapsed().as_secs_f64() * 1000.0);
+                        println!(
+                            "  Total:     {:>10.3}ms",
+                            total_start.elapsed().as_secs_f64() * 1000.0
+                        );
                     }
-                    
+
                     if show_stats && use_opt {
                         println!();
                         println!("{}", optimizer.stats());
                     }
-                    
+
                     process::exit(result as i32);
                 }
                 None => {
@@ -249,14 +248,14 @@ fn main() {
                 }
             }
         }
-        
+
         #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
         {
             eprintln!("JIT compilation only supported on Linux x86-64");
             process::exit(1);
         }
     }
-    
+
     if use_gc {
         // GC-integrated VM (heap-allocated arrays)
         let mut vm = GcVm::new(&compiled).with_debug(debug);
@@ -266,10 +265,7 @@ fn main() {
         if !result.success {
             eprintln!(
                 "TRAP: {:?} (code {}) at PC {} after {} cycles",
-                result.trap_code,
-                result.trap_code as u8,
-                result.pc,
-                result.cycles
+                result.trap_code, result.trap_code as u8, result.pc, result.cycles
             );
             eprintln!("Stack depth: {}", result.stack_depth);
             eprintln!("Frame depth: {}", result.frame_depth);
@@ -280,15 +276,27 @@ fn main() {
             println!();
             println!("=== Timing (GC VM) ===");
             println!("  Lexer:      {:>10.3}ms", lex_time.as_secs_f64() * 1000.0);
-            println!("  Parser:     {:>10.3}ms", parse_time.as_secs_f64() * 1000.0);
+            println!(
+                "  Parser:     {:>10.3}ms",
+                parse_time.as_secs_f64() * 1000.0
+            );
             println!("  Semantic:   {:>10.3}ms", sema_time.as_secs_f64() * 1000.0);
-            println!("  Compile:    {:>10.3}ms", compile_time.as_secs_f64() * 1000.0);
+            println!(
+                "  Compile:    {:>10.3}ms",
+                compile_time.as_secs_f64() * 1000.0
+            );
             if use_opt {
                 println!("  Optimize:   {:>10.3}ms", opt_time.as_secs_f64() * 1000.0);
             }
-            println!("  Execute:    {:>10.3}ms ({} cycles)", 
-                exec_time.as_secs_f64() * 1000.0, result.cycles);
-            println!("  Total:      {:>10.3}ms", total_start.elapsed().as_secs_f64() * 1000.0);
+            println!(
+                "  Execute:    {:>10.3}ms ({} cycles)",
+                exec_time.as_secs_f64() * 1000.0,
+                result.cycles
+            );
+            println!(
+                "  Total:      {:>10.3}ms",
+                total_start.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         if show_stats {
@@ -321,10 +329,7 @@ fn main() {
             // Frame depth: <len(frame_stack)>
             eprintln!(
                 "TRAP: {:?} (code {}) at PC {} after {} cycles",
-                result.trap_code,
-                result.trap_code as u8,
-                result.pc,
-                result.cycles
+                result.trap_code, result.trap_code as u8, result.pc, result.cycles
             );
             eprintln!("Stack depth: {}", result.stack_depth);
             eprintln!("Frame depth: {}", result.frame_depth);
@@ -335,15 +340,27 @@ fn main() {
             println!();
             println!("=== Timing (Interpreter) ===");
             println!("  Lexer:      {:>10.3}ms", lex_time.as_secs_f64() * 1000.0);
-            println!("  Parser:     {:>10.3}ms", parse_time.as_secs_f64() * 1000.0);
+            println!(
+                "  Parser:     {:>10.3}ms",
+                parse_time.as_secs_f64() * 1000.0
+            );
             println!("  Semantic:   {:>10.3}ms", sema_time.as_secs_f64() * 1000.0);
-            println!("  Compile:    {:>10.3}ms", compile_time.as_secs_f64() * 1000.0);
+            println!(
+                "  Compile:    {:>10.3}ms",
+                compile_time.as_secs_f64() * 1000.0
+            );
             if use_opt {
                 println!("  Optimize:   {:>10.3}ms", opt_time.as_secs_f64() * 1000.0);
             }
-            println!("  Execute:    {:>10.3}ms ({} cycles)", 
-                exec_time.as_secs_f64() * 1000.0, result.cycles);
-            println!("  Total:      {:>10.3}ms", total_start.elapsed().as_secs_f64() * 1000.0);
+            println!(
+                "  Execute:    {:>10.3}ms ({} cycles)",
+                exec_time.as_secs_f64() * 1000.0,
+                result.cycles
+            );
+            println!(
+                "  Total:      {:>10.3}ms",
+                total_start.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         if show_stats {

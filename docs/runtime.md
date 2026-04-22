@@ -15,7 +15,7 @@
 | Call frames | 100 max |
 | Operand stack | 1000 entries |
 | Execution cycles | 100,000 max |
-| Instructions | 10,000 max |
+| Instructions | 10,000 max (constant exists; not currently enforced) |
 
 ### Trap Codes
 | Code | Name | Description |
@@ -26,11 +26,14 @@
 | 4 | TRAP_STACK_OVERFLOW | Call stack exceeded 100 frames |
 | 5 | TRAP_CYCLE_LIMIT | Exceeded 100,000 cycles |
 | 6 | TRAP_UNDEFINED_FUNCTION | Call to undefined function |
+| 7 | TRAP_STACK_UNDERFLOW | Bytecode popped from an empty operand stack |
+| 8 | TRAP_INVALID_INSTRUCTION | Bytecode could not be executed by this backend |
 
 ### Trap Message Format
 ```
-Runtime error: <message> (<TrapCode>)
-  Cycles executed: <count>
+TRAP: <TrapCode> (code <n>) at PC <pc> after <cycles> cycles
+Stack depth: <depth>
+Frame depth: <depth>
 ```
 
 ## 32-Bit Arithmetic
@@ -108,9 +111,11 @@ fn normalize_i32(value: i64) -> i64 {
 ### Logical
 | Opcode | Description |
 |--------|-------------|
-| AND | a && b (short-circuit) |
-| OR | a \|\| b (short-circuit) |
+| AND | a && b for already-evaluated operands |
+| OR | a \|\| b for already-evaluated operands |
 | NOT | !a → 0 or 1 |
+
+Source-level `&&` and `||` short-circuit through compiler-emitted conditional jumps.
 
 ### Control Flow
 | Opcode | Args | Description |

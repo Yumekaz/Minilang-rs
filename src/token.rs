@@ -48,20 +48,20 @@ pub enum TokenKind {
     Slash,
 
     // Comparison operators
-    Eq,      // ==
-    Ne,      // !=
-    Lt,      // <
-    Gt,      // >
-    Le,      // <=
-    Ge,      // >=
+    Eq, // ==
+    Ne, // !=
+    Lt, // <
+    Gt, // >
+    Le, // <=
+    Ge, // >=
 
     // Logical operators
-    And,     // &&
-    Or,      // ||
-    Not,     // !
+    And, // &&
+    Or,  // ||
+    Not, // !
 
     // Assignment
-    Assign,  // =
+    Assign, // =
 
     // Delimiters
     LParen,

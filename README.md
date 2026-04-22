@@ -114,6 +114,9 @@ perf report
 
 ## Language Reference
 
+The current source-of-truth language contract lives in
+[`docs/spec.md`](docs/spec.md). The summary below covers the main surface.
+
 ### Types
 - `int`: 32-bit signed integer
 - `bool`: boolean (true/false)

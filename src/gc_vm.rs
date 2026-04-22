@@ -6,9 +6,9 @@
 //! - Arrays are heap-allocated and GC-managed
 //! - Root tracking prevents premature collection
 
+use crate::alloc::BumpAllocator;
 use crate::compiler::{CompiledProgram, Opcode};
 use crate::gc::{GarbageCollector, TypeTag};
-use crate::alloc::BumpAllocator;
 use crate::vm::TrapCode;
 use std::collections::HashMap;
 
@@ -171,7 +171,9 @@ impl<'a> GcVm<'a> {
     pub const GC_THRESHOLD: usize = 8; // Collect after 8 arrays allocated
 
     pub fn new(program: &'a CompiledProgram) -> Self {
-        let globals_size = program.globals.values()
+        let globals_size = program
+            .globals
+            .values()
             .map(|g| if g.is_array { g.array_size } else { 1 })
             .sum::<usize>()
             .max(Self::MAX_GLOBALS);
@@ -214,7 +216,7 @@ impl<'a> GcVm<'a> {
         }
 
         let array = HeapArray::new(size);
-        
+
         // Reuse a free slot if available
         if let Some(slot) = self.free_array_slots.pop() {
             self.heap_arrays[slot as usize] = Some(array);
@@ -238,7 +240,9 @@ impl<'a> GcVm<'a> {
 
     /// Get mutable array by ID
     fn get_array_mut(&mut self, id: u32) -> Option<&mut HeapArray> {
-        self.heap_arrays.get_mut(id as usize).and_then(|a| a.as_mut())
+        self.heap_arrays
+            .get_mut(id as usize)
+            .and_then(|a| a.as_mut())
     }
 
     /// Mark-sweep garbage collection
@@ -280,7 +284,11 @@ impl<'a> GcVm<'a> {
 
         // Mark phase
         for id in ids_to_mark {
-            if let Some(arr) = self.heap_arrays.get_mut(id as usize).and_then(|a| a.as_mut()) {
+            if let Some(arr) = self
+                .heap_arrays
+                .get_mut(id as usize)
+                .and_then(|a| a.as_mut())
+            {
                 arr.marked = true;
             }
         }
@@ -305,14 +313,19 @@ impl<'a> GcVm<'a> {
     }
 
     fn mark_array(&mut self, id: u32) {
-        if let Some(arr) = self.heap_arrays.get_mut(id as usize).and_then(|a| a.as_mut()) {
+        if let Some(arr) = self
+            .heap_arrays
+            .get_mut(id as usize)
+            .and_then(|a| a.as_mut())
+        {
             arr.marked = true;
         }
     }
 
     /// Pop value from stack
     fn pop(&mut self) -> Result<GcValue, (TrapCode, String)> {
-        self.stack.pop()
+        self.stack
+            .pop()
             .ok_or((TrapCode::StackUnderflow, "Stack underflow".to_string()))
     }
 
@@ -401,12 +414,15 @@ impl<'a> GcVm<'a> {
             self.cycles += 1;
 
             if self.debug {
-                let stack_str: Vec<String> = self.stack.iter()
-                    .map(|v| format!("{:?}", v))
-                    .collect();
+                let stack_str: Vec<String> =
+                    self.stack.iter().map(|v| format!("{:?}", v)).collect();
                 eprintln!(
                     "[cycle={} pc={}] EXEC {:?} {} {} | stack=[{}]",
-                    self.cycles, self.pc, instr.opcode, instr.arg1, instr.arg2,
+                    self.cycles,
+                    self.pc,
+                    instr.opcode,
+                    instr.arg1,
+                    instr.arg2,
                     stack_str.join(", ")
                 );
             }
@@ -422,9 +438,7 @@ impl<'a> GcVm<'a> {
 
             // Check for exit
             if self.call_stack.is_empty() {
-                let return_value = self.stack.pop()
-                    .map(|v| v.to_i64())
-                    .unwrap_or(0);
+                let return_value = self.stack.pop().map(|v| v.to_i64()).unwrap_or(0);
                 return GcVmResult {
                     success: true,
                     return_value,
@@ -491,21 +505,24 @@ impl<'a> GcVm<'a> {
             Opcode::Add => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(Self::normalize_i32(a.wrapping_add(b))));
+                self.stack
+                    .push(GcValue::Int(Self::normalize_i32(a.wrapping_add(b))));
                 Ok(true)
             }
 
             Opcode::Sub => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(Self::normalize_i32(a.wrapping_sub(b))));
+                self.stack
+                    .push(GcValue::Int(Self::normalize_i32(a.wrapping_sub(b))));
                 Ok(true)
             }
 
             Opcode::Mul => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(Self::normalize_i32(a.wrapping_mul(b))));
+                self.stack
+                    .push(GcValue::Int(Self::normalize_i32(a.wrapping_mul(b))));
                 Ok(true)
             }
 
@@ -570,20 +587,31 @@ impl<'a> GcVm<'a> {
             Opcode::And => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                self.stack.push(GcValue::Int(if a.is_truthy() && b.is_truthy() { 1 } else { 0 }));
+                self.stack
+                    .push(GcValue::Int(if a.is_truthy() && b.is_truthy() {
+                        1
+                    } else {
+                        0
+                    }));
                 Ok(true)
             }
 
             Opcode::Or => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                self.stack.push(GcValue::Int(if a.is_truthy() || b.is_truthy() { 1 } else { 0 }));
+                self.stack
+                    .push(GcValue::Int(if a.is_truthy() || b.is_truthy() {
+                        1
+                    } else {
+                        0
+                    }));
                 Ok(true)
             }
 
             Opcode::Not => {
                 let a = self.pop()?;
-                self.stack.push(GcValue::Int(if !a.is_truthy() { 1 } else { 0 }));
+                self.stack
+                    .push(GcValue::Int(if !a.is_truthy() { 1 } else { 0 }));
                 Ok(true)
             }
 
@@ -601,8 +629,10 @@ impl<'a> GcVm<'a> {
             }
 
             Opcode::Dup => {
-                let value = *self.stack.last()
-                    .ok_or((TrapCode::StackUnderflow, "Stack underflow on DUP".to_string()))?;
+                let value = *self.stack.last().ok_or((
+                    TrapCode::StackUnderflow,
+                    "Stack underflow on DUP".to_string(),
+                ))?;
                 self.stack.push(value);
                 Ok(true)
             }
@@ -636,14 +666,21 @@ impl<'a> GcVm<'a> {
                 let func_id = arg1 as usize;
                 let arg_count = arg2 as usize;
 
-                let func = self.program.functions.get(&func_id)
-                    .ok_or((TrapCode::UndefinedFunction, format!("Undefined function {}", func_id)))?
+                let func = self
+                    .program
+                    .functions
+                    .get(&func_id)
+                    .ok_or((
+                        TrapCode::UndefinedFunction,
+                        format!("Undefined function {}", func_id),
+                    ))?
                     .clone();
 
                 if self.call_stack.len() >= Self::MAX_FRAMES {
-                    return Err((TrapCode::StackOverflow, format!(
-                        "Call stack overflow (max {} frames)", Self::MAX_FRAMES
-                    )));
+                    return Err((
+                        TrapCode::StackOverflow,
+                        format!("Call stack overflow (max {} frames)", Self::MAX_FRAMES),
+                    ));
                 }
 
                 // Pop arguments
@@ -654,11 +691,7 @@ impl<'a> GcVm<'a> {
                 args.reverse();
 
                 // Create new frame
-                let mut new_frame = GcCallFrame::new(
-                    func.local_count,
-                    self.pc + 1,
-                    func_id,
-                );
+                let mut new_frame = GcCallFrame::new(func.local_count, self.pc + 1, func_id);
 
                 // Initialize parameters
                 for (i, arg) in args.into_iter().enumerate() {
@@ -700,9 +733,10 @@ impl<'a> GcVm<'a> {
                 let index = self.pop_int()? as usize;
 
                 if index >= size {
-                    return Err((TrapCode::ArrayOutOfBounds, format!(
-                        "Array index {} out of bounds (size {})", index, size
-                    )));
+                    return Err((
+                        TrapCode::ArrayOutOfBounds,
+                        format!("Array index {} out of bounds (size {})", index, size),
+                    ));
                 }
 
                 // Check if this is a global array (stored as ArrayRef)
@@ -711,7 +745,10 @@ impl<'a> GcVm<'a> {
                         if let Some(arr) = self.get_array(*id) {
                             GcValue::Int(arr.data[index])
                         } else {
-                            return Err((TrapCode::InvalidInstruction, "Invalid array reference".to_string()));
+                            return Err((
+                                TrapCode::InvalidInstruction,
+                                "Invalid array reference".to_string(),
+                            ));
                         }
                     }
                     GcValue::Int(_) => {
@@ -731,9 +768,10 @@ impl<'a> GcVm<'a> {
                 let index = self.pop_int()? as usize;
 
                 if index >= size {
-                    return Err((TrapCode::ArrayOutOfBounds, format!(
-                        "Array index {} out of bounds (size {})", index, size
-                    )));
+                    return Err((
+                        TrapCode::ArrayOutOfBounds,
+                        format!("Array index {} out of bounds (size {})", index, size),
+                    ));
                 }
 
                 // Check if this is a global array
@@ -742,7 +780,10 @@ impl<'a> GcVm<'a> {
                         if let Some(arr) = self.get_array_mut(id) {
                             arr.data[index] = value;
                         } else {
-                            return Err((TrapCode::InvalidInstruction, "Invalid array reference".to_string()));
+                            return Err((
+                                TrapCode::InvalidInstruction,
+                                "Invalid array reference".to_string(),
+                            ));
                         }
                     }
                     GcValue::Int(_) => {
@@ -760,9 +801,10 @@ impl<'a> GcVm<'a> {
                 let index = self.pop_int()? as usize;
 
                 if index >= size {
-                    return Err((TrapCode::ArrayOutOfBounds, format!(
-                        "Array index {} out of bounds (size {})", index, size
-                    )));
+                    return Err((
+                        TrapCode::ArrayOutOfBounds,
+                        format!("Array index {} out of bounds (size {})", index, size),
+                    ));
                 }
 
                 let frame = self.call_stack.last().unwrap();
@@ -771,11 +813,19 @@ impl<'a> GcVm<'a> {
                         if let Some(arr) = self.get_array(id) {
                             GcValue::Int(arr.data[index])
                         } else {
-                            return Err((TrapCode::InvalidInstruction, "Invalid array reference".to_string()));
+                            return Err((
+                                TrapCode::InvalidInstruction,
+                                "Invalid array reference".to_string(),
+                            ));
                         }
                     }
                     Some(GcValue::Int(v)) => GcValue::Int(v),
-                    None => return Err((TrapCode::UndefinedLocal, format!("Undefined local at slot {}", base))),
+                    None => {
+                        return Err((
+                            TrapCode::UndefinedLocal,
+                            format!("Undefined local at slot {}", base),
+                        ))
+                    }
                 };
 
                 self.stack.push(value);
@@ -789,21 +839,30 @@ impl<'a> GcVm<'a> {
                 let index = self.pop_int()? as usize;
 
                 if index >= size {
-                    return Err((TrapCode::ArrayOutOfBounds, format!(
-                        "Array index {} out of bounds (size {})", index, size
-                    )));
+                    return Err((
+                        TrapCode::ArrayOutOfBounds,
+                        format!("Array index {} out of bounds (size {})", index, size),
+                    ));
                 }
 
                 let frame = self.call_stack.last().unwrap();
                 let array_ref = match frame.get(base) {
                     Some(GcValue::ArrayRef(id)) => id,
-                    _ => return Err((TrapCode::InvalidInstruction, "Expected array reference".to_string())),
+                    _ => {
+                        return Err((
+                            TrapCode::InvalidInstruction,
+                            "Expected array reference".to_string(),
+                        ))
+                    }
                 };
 
                 if let Some(arr) = self.get_array_mut(array_ref) {
                     arr.data[index] = value;
                 } else {
-                    return Err((TrapCode::InvalidInstruction, "Invalid array reference".to_string()));
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        "Invalid array reference".to_string(),
+                    ));
                 }
 
                 Ok(true)
@@ -892,7 +951,7 @@ mod tests {
     #[test]
     fn test_gc_vm_function_call() {
         let result = compile_and_run_gc(
-            "func add(int a, int b) { return a + b; } func main() { return add(3, 4); }"
+            "func add(int a, int b) { return a + b; } func main() { return add(3, 4); }",
         );
         assert!(result.success);
         assert_eq!(result.return_value, 7);
@@ -908,7 +967,7 @@ mod tests {
     #[test]
     fn test_gc_vm_global_array() {
         let result = compile_and_run_gc(
-            "int arr[5]; func main() { arr[0] = 10; arr[1] = 20; return arr[0] + arr[1]; }"
+            "int arr[5]; func main() { arr[0] = 10; arr[1] = 20; return arr[0] + arr[1]; }",
         );
         assert!(result.success);
         assert_eq!(result.return_value, 30);

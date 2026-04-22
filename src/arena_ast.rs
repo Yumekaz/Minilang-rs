@@ -27,9 +27,18 @@ pub enum Type {
 /// Binary operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
-    Add, Sub, Mul, Div,
-    Eq, Ne, Lt, Gt, Le, Ge,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    And,
+    Or,
 }
 
 /// Unary operators
@@ -57,7 +66,7 @@ impl ArenaStr {
                 len: 0,
             });
         }
-        
+
         let ptr = arena.alloc(len)?;
         unsafe {
             std::ptr::copy_nonoverlapping(s.as_ptr(), ptr.as_ptr(), len);
@@ -126,11 +135,11 @@ impl<T> ArenaVec<T> {
                 _marker: std::marker::PhantomData,
             });
         }
-        
+
         let size = cap * std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
         let ptr = arena.alloc_aligned(size, align)?;
-        
+
         Some(Self {
             ptr: ptr.cast(),
             len: 0,
@@ -153,9 +162,7 @@ impl<T> ArenaVec<T> {
         if self.len == 0 {
             return &[];
         }
-        unsafe {
-            std::slice::from_raw_parts(self.ptr.as_ptr(), self.len)
-        }
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
     /// Get length
@@ -330,7 +337,9 @@ impl AstArena {
 
     /// Allocate an expression
     pub fn alloc_expr(&self, expr: ArenaExpr) -> NonNull<ArenaExpr> {
-        let ptr = self.bump.alloc_typed::<ArenaExpr>()
+        let ptr = self
+            .bump
+            .alloc_typed::<ArenaExpr>()
             .expect("AST arena out of memory");
         unsafe {
             ptr.as_ptr().write(expr);
@@ -340,7 +349,9 @@ impl AstArena {
 
     /// Allocate a statement
     pub fn alloc_stmt(&self, stmt: ArenaStmt) -> NonNull<ArenaStmt> {
-        let ptr = self.bump.alloc_typed::<ArenaStmt>()
+        let ptr = self
+            .bump
+            .alloc_typed::<ArenaStmt>()
             .expect("AST arena out of memory");
         unsafe {
             ptr.as_ptr().write(stmt);
@@ -400,13 +411,13 @@ mod tests {
     #[test]
     fn test_ast_arena() {
         let arena = AstArena::new();
-        
+
         // Allocate an expression
         let expr = arena.alloc_expr(ArenaExpr::IntLiteral {
             value: 42,
             span: Span { line: 1, column: 1 },
         });
-        
+
         unsafe {
             match expr.as_ref() {
                 ArenaExpr::IntLiteral { value, .. } => assert_eq!(*value, 42),

@@ -2,8 +2,8 @@
 //!
 //! Transforms a token stream into an Abstract Syntax Tree (AST).
 
-use crate::token::{Token, TokenKind, Span};
 use crate::ast::*;
+use crate::token::{Span, Token, TokenKind};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -25,11 +25,15 @@ impl Parser {
     }
 
     fn current(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or(&self.tokens[self.tokens.len() - 1])
+        self.tokens
+            .get(self.pos)
+            .unwrap_or(&self.tokens[self.tokens.len() - 1])
     }
 
     fn peek(&self) -> &Token {
-        self.tokens.get(self.pos + 1).unwrap_or(&self.tokens[self.tokens.len() - 1])
+        self.tokens
+            .get(self.pos + 1)
+            .unwrap_or(&self.tokens[self.tokens.len() - 1])
     }
 
     fn advance(&mut self) -> &Token {
@@ -612,7 +616,13 @@ mod tests {
         let program = parse("func main() { return 1 + 2 * 3; }").unwrap();
         // Should parse as 1 + (2 * 3) due to precedence
         if let Stmt::Return { value, .. } = &program.functions[0].body[0] {
-            assert!(matches!(value, Expr::Binary { op: BinaryOp::Add, .. }));
+            assert!(matches!(
+                value,
+                Expr::Binary {
+                    op: BinaryOp::Add,
+                    ..
+                }
+            ));
         } else {
             panic!("Expected return statement");
         }

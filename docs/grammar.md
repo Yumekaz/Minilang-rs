@@ -10,7 +10,7 @@ BOOL        = "true" | "false"
 
 ## Keywords
 ```
-int, bool, void, if, else, while, return, print, func, true, false
+int, bool, if, else, while, return, print, func, true, false
 ```
 
 ## Operators (by precedence, lowest to highest)
@@ -95,3 +95,4 @@ args        = expr { "," expr }* ;
 4. Array indices must be `int` type
 5. Condition expressions must be `int` or `bool` (0 = false, non-zero = true)
 6. Function calls must match parameter count and types
+7. Shadowing is currently rejected; visible globals, functions, parameters, and locals share one name set

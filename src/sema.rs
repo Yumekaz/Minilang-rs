@@ -2,9 +2,9 @@
 //!
 //! Performs type checking, scope analysis, and validation.
 
-use std::collections::HashMap;
 use crate::ast::*;
 use crate::token::Span;
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -133,7 +133,10 @@ impl SemanticAnalyzer {
                 param_types: vec![],
             };
             if !self.scope.define(sym) {
-                self.error(&format!("Duplicate global variable: {}", glob.name), glob.span);
+                self.error(
+                    &format!("Duplicate global variable: {}", glob.name),
+                    glob.span,
+                );
             }
 
             // Type check initializer
@@ -167,7 +170,12 @@ impl SemanticAnalyzer {
                 self.error(&format!("Duplicate function: {}", func.name), func.span);
             } else {
                 self.functions.insert(func.name.clone(), sym.clone());
-                self.scope.define(sym);
+                if !self.scope.define(sym) {
+                    self.error(
+                        &format!("Duplicate top-level symbol: {}", func.name),
+                        func.span,
+                    );
+                }
             }
         }
     }
@@ -178,6 +186,14 @@ impl SemanticAnalyzer {
 
         // Add parameters to scope
         for param in &func.params {
+            if self.scope.lookup(&param.name).is_some() {
+                self.error(
+                    &format!("Parameter shadows existing symbol: {}", param.name),
+                    param.span,
+                );
+                continue;
+            }
+
             let sym = Symbol {
                 name: param.name.clone(),
                 sym_type: param.param_type,
@@ -210,6 +226,14 @@ impl SemanticAnalyzer {
                 array_size,
                 span,
             } => {
+                if self.scope.lookup(name).is_some() {
+                    self.error(
+                        &format!("Variable shadows existing symbol: {}", name),
+                        *span,
+                    );
+                    return;
+                }
+
                 let sym = Symbol {
                     name: name.clone(),
                     sym_type: *var_type,
@@ -227,7 +251,10 @@ impl SemanticAnalyzer {
                     let init_type = self.analyze_expr(init);
                     if init_type != *var_type && init_type != Type::Error {
                         self.error(
-                            &format!("Type mismatch: cannot assign {:?} to {:?}", init_type, var_type),
+                            &format!(
+                                "Type mismatch: cannot assign {:?} to {:?}",
+                                init_type, var_type
+                            ),
                             *span,
                         );
                     }
@@ -245,6 +272,11 @@ impl SemanticAnalyzer {
                     return;
                 };
 
+                if sym.is_function {
+                    self.error(&format!("Cannot assign to function: {}", target), *span);
+                    return;
+                }
+
                 if let Some(idx) = index_expr {
                     let index_type = self.analyze_expr(idx);
                     if index_type != Type::Int && index_type != Type::Error {
@@ -254,7 +286,10 @@ impl SemanticAnalyzer {
                         self.error(&format!("Cannot index non-array: {}", target), *span);
                     }
                 } else if sym.is_array {
-                    self.error(&format!("Cannot assign to array without index: {}", target), *span);
+                    self.error(
+                        &format!("Cannot assign to array without index: {}", target),
+                        *span,
+                    );
                     return;
                 }
 
@@ -351,7 +386,12 @@ impl SemanticAnalyzer {
                 sym.sym_type
             }
 
-            Expr::Binary { op, left, right, span } => {
+            Expr::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => {
                 let left_type = self.analyze_expr(left);
                 let right_type = self.analyze_expr(right);
 

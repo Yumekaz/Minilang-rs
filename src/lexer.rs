@@ -2,7 +2,7 @@
 //!
 //! Transforms source code into a stream of tokens.
 
-use crate::token::{Token, TokenKind, Span};
+use crate::token::{Span, Token, TokenKind};
 
 /// Lexer for MiniLang source code
 pub struct Lexer<'a> {
@@ -108,7 +108,7 @@ impl<'a> Lexer<'a> {
         }
 
         let text = std::str::from_utf8(&self.source[start..self.pos]).unwrap();
-        
+
         let kind = match text {
             "int" => TokenKind::Int,
             "bool" => TokenKind::Bool,
@@ -145,7 +145,7 @@ impl<'a> Lexer<'a> {
 
         // Operators and delimiters
         let span = Span::new(self.line, self.column);
-        
+
         // Two-character operators
         if ch == b'=' && self.peek() == Some(b'=') {
             self.advance();
@@ -212,7 +212,7 @@ mod tests {
     fn test_simple_tokens() {
         let mut lexer = Lexer::new("func main() { return 42; }");
         let tokens = lexer.tokenize();
-        
+
         assert!(matches!(tokens[0].kind, TokenKind::Func));
         assert!(matches!(tokens[1].kind, TokenKind::Identifier(ref s) if s == "main"));
         assert!(matches!(tokens[2].kind, TokenKind::LParen));
@@ -229,7 +229,7 @@ mod tests {
     fn test_operators() {
         let mut lexer = Lexer::new("== != <= >= && || + - * /");
         let tokens = lexer.tokenize();
-        
+
         assert!(matches!(tokens[0].kind, TokenKind::Eq));
         assert!(matches!(tokens[1].kind, TokenKind::Ne));
         assert!(matches!(tokens[2].kind, TokenKind::Le));
@@ -242,7 +242,7 @@ mod tests {
     fn test_comments() {
         let mut lexer = Lexer::new("42 // this is a comment\n123");
         let tokens = lexer.tokenize();
-        
+
         assert!(matches!(tokens[0].kind, TokenKind::IntLiteral(42)));
         assert!(matches!(tokens[1].kind, TokenKind::IntLiteral(123)));
     }

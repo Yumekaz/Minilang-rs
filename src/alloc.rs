@@ -26,7 +26,7 @@ const fn align_up(size: usize, align: usize) -> usize {
 // ============================================================================
 
 /// Fast bump allocator - allocates sequentially, frees all at once.
-/// 
+///
 /// Perfect for:
 /// - Compiler phases (parse, analyze, compile)
 /// - Temporary allocations with known lifetime
@@ -76,7 +76,7 @@ impl BumpAllocator {
     /// Allocate `size` bytes with specified alignment
     pub fn alloc_aligned(&self, size: usize, align: usize) -> Option<NonNull<u8>> {
         let ptr = unsafe { *self.ptr.get() };
-        
+
         // Align the current pointer
         let aligned = align_up(ptr as usize, align) as *mut u8;
         let new_ptr = unsafe { aligned.add(size) };
@@ -257,12 +257,12 @@ impl FreeListAllocator {
     }
 
     /// Free a previously allocated block
-    /// 
+    ///
     /// # Safety
     /// The pointer must have been returned by `alloc` on this allocator
     pub unsafe fn free(&self, ptr: NonNull<u8>) {
         let header = (ptr.as_ptr() as *mut BlockHeader).sub(1);
-        
+
         *self.allocation_count.get() -= 1;
         *self.bytes_allocated.get() -= (*header).size;
 
@@ -369,7 +369,7 @@ impl SlabAllocator {
     /// Create a new slab allocator for objects of the given size
     pub fn new(object_size: usize, objects_per_slab: usize) -> Self {
         let aligned_size = align_up(object_size.max(std::mem::size_of::<*mut u8>()), ALIGNMENT);
-        
+
         Self {
             object_size: aligned_size,
             objects_per_slab,
@@ -455,7 +455,7 @@ impl Drop for SlabAllocator {
     fn drop(&mut self) {
         let slab_size = self.object_size * self.objects_per_slab;
         let layout = Layout::from_size_align(slab_size, ALIGNMENT).unwrap();
-        
+
         unsafe {
             for slab in (*self.slabs.get()).iter() {
                 dealloc(*slab, layout);
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn test_bump_allocator() {
         let bump = BumpAllocator::new(1024);
-        
+
         let p1 = bump.alloc(100).unwrap();
         let p2 = bump.alloc(200).unwrap();
         let p3 = bump.alloc(300).unwrap();
@@ -545,7 +545,7 @@ mod tests {
 
         // Allocate again - should reuse freed space
         let p4 = fl.alloc(150).unwrap();
-        
+
         let stats = fl.stats();
         assert_eq!(stats.allocation_count, 3);
     }

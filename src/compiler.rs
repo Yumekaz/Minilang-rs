@@ -128,20 +128,20 @@ pub struct Compiler {
     functions: HashMap<usize, FunctionInfo>,
     globals: HashMap<String, GlobalInfo>,
     func_name_to_id: HashMap<String, usize>,
-    
+
     // Current function state
     current_locals: HashMap<String, LocalVar>,
     next_local_slot: usize,
-    
+
     // Global allocation
     next_global_slot: usize,
     next_func_id: usize,
     main_func_id: Option<usize>,
-    
+
     // Constants pool
     constants: Vec<i32>,
     const_map: HashMap<i32, usize>,
-    
+
     // Arena allocator for string interning during compilation
     string_arena: crate::alloc::BumpAllocator,
     interned_strings: usize, // Count of interned strings
@@ -180,13 +180,16 @@ impl Compiler {
 
         let stats = self.string_arena.stats();
 
-        (CompiledProgram {
-            instructions: self.instructions,
-            functions: self.functions,
-            globals: self.globals,
-            main_func_id: self.main_func_id.unwrap_or(0),
-            constants: self.constants,
-        }, stats)
+        (
+            CompiledProgram {
+                instructions: self.instructions,
+                functions: self.functions,
+                globals: self.globals,
+                main_func_id: self.main_func_id.unwrap_or(0),
+                constants: self.constants,
+            },
+            stats,
+        )
     }
 
     /// Intern a string in the arena (returns pointer for deduplication)
@@ -267,10 +270,10 @@ impl Compiler {
         for func in &program.functions {
             let id = self.next_func_id;
             self.next_func_id += 1;
-            
+
             // Intern function name in arena
             self.intern_string(&func.name);
-            
+
             self.func_name_to_id.insert(func.name.clone(), id);
 
             if func.name == "main" {
@@ -305,7 +308,8 @@ impl Compiler {
 
         // Reset for compilation (keep params)
         self.next_local_slot = func.params.len();
-        self.current_locals.retain(|_, v| v.slot < func.params.len());
+        self.current_locals
+            .retain(|_, v| v.slot < func.params.len());
 
         // If this is main, compile global initializers first
         if func.name == "main" {
@@ -346,7 +350,9 @@ impl Compiler {
     fn collect_local_decls(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             match stmt {
-                Stmt::VarDecl { name, array_size, .. } => {
+                Stmt::VarDecl {
+                    name, array_size, ..
+                } => {
                     if !self.current_locals.contains_key(name) {
                         // Arrays only need 1 slot for the reference
                         let slot = self.next_local_slot;
@@ -364,7 +370,11 @@ impl Compiler {
                         );
                     }
                 }
-                Stmt::If { then_body, else_body, .. } => {
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
                     self.collect_local_decls(then_body);
                     if let Some(else_stmts) = else_body {
                         self.collect_local_decls(else_stmts);
@@ -380,7 +390,12 @@ impl Compiler {
 
     fn compile_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::VarDecl { name, init_expr, array_size, .. } => {
+            Stmt::VarDecl {
+                name,
+                init_expr,
+                array_size,
+                ..
+            } => {
                 // Ensure local is allocated
                 if !self.current_locals.contains_key(name) {
                     let (slot, size) = if let Some(arr_size) = array_size {
@@ -417,13 +432,22 @@ impl Compiler {
                 }
             }
 
-            Stmt::Assign { target, index_expr, value, .. } => {
+            Stmt::Assign {
+                target,
+                index_expr,
+                value,
+                ..
+            } => {
                 if let Some(local) = self.current_locals.get(target).cloned() {
                     if let Some(idx_expr) = index_expr {
                         // Local array store: arr[idx] = value
                         self.compile_expr(idx_expr);
                         self.compile_expr(value);
-                        self.emit(Opcode::LocalArrayStore, local.slot as i32, local.array_size as i32);
+                        self.emit(
+                            Opcode::LocalArrayStore,
+                            local.slot as i32,
+                            local.array_size as i32,
+                        );
                     } else {
                         self.compile_expr(value);
                         self.emit(Opcode::StoreLocal, local.slot as i32, 0);
@@ -433,7 +457,11 @@ impl Compiler {
                         // Global array store
                         self.compile_expr(idx_expr);
                         self.compile_expr(value);
-                        self.emit(Opcode::ArrayStore, global.slot as i32, global.array_size as i32);
+                        self.emit(
+                            Opcode::ArrayStore,
+                            global.slot as i32,
+                            global.array_size as i32,
+                        );
                     } else {
                         self.compile_expr(value);
                         self.emit(Opcode::StoreGlobal, global.slot as i32, 0);
@@ -441,7 +469,12 @@ impl Compiler {
                 }
             }
 
-            Stmt::If { condition, then_body, else_body, .. } => {
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+                ..
+            } => {
                 self.compile_expr(condition);
                 let jump_to_else = self.emit(Opcode::JumpIfFalse, 0, 0);
 
@@ -466,7 +499,9 @@ impl Compiler {
                 }
             }
 
-            Stmt::While { condition, body, .. } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 let loop_pc = self.current_pc();
                 self.compile_expr(condition);
                 let jump_to_exit = self.emit(Opcode::JumpIfFalse, 0, 0);
@@ -515,7 +550,9 @@ impl Compiler {
                 }
             }
 
-            Expr::Binary { op, left, right, .. } => {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
                 // Handle short-circuit for And/Or
                 match op {
                     BinaryOp::And => {
@@ -586,13 +623,23 @@ impl Compiler {
                 self.emit(Opcode::Call, func_id as i32, args.len() as i32);
             }
 
-            Expr::ArrayIndex { array_name, index, .. } => {
+            Expr::ArrayIndex {
+                array_name, index, ..
+            } => {
                 self.compile_expr(index);
 
                 if let Some(local) = self.current_locals.get(array_name) {
-                    self.emit(Opcode::LocalArrayLoad, local.slot as i32, local.array_size as i32);
+                    self.emit(
+                        Opcode::LocalArrayLoad,
+                        local.slot as i32,
+                        local.array_size as i32,
+                    );
                 } else if let Some(global) = self.globals.get(array_name) {
-                    self.emit(Opcode::ArrayLoad, global.slot as i32, global.array_size as i32);
+                    self.emit(
+                        Opcode::ArrayLoad,
+                        global.slot as i32,
+                        global.array_size as i32,
+                    );
                 }
             }
         }
@@ -612,7 +659,10 @@ pub fn disassemble(program: &CompiledProgram) -> String {
     output.push_str("=== Globals ===\n");
     for (name, info) in &program.globals {
         if info.is_array {
-            output.push_str(&format!("  {} [{}]: slot {}\n", name, info.array_size, info.slot));
+            output.push_str(&format!(
+                "  {} [{}]: slot {}\n",
+                name, info.array_size, info.slot
+            ));
         } else {
             output.push_str(&format!("  {}: slot {}\n", name, info.slot));
         }
