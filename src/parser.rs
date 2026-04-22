@@ -30,12 +30,6 @@ impl Parser {
             .unwrap_or(&self.tokens[self.tokens.len() - 1])
     }
 
-    fn peek(&self) -> &Token {
-        self.tokens
-            .get(self.pos + 1)
-            .unwrap_or(&self.tokens[self.tokens.len() - 1])
-    }
-
     fn advance(&mut self) -> &Token {
         let token = self.current();
         if !matches!(token.kind, TokenKind::Eof) {

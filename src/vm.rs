@@ -4,7 +4,7 @@
 //! Used as fallback when JIT is not available and for debugging.
 
 use crate::alloc::BumpAllocator;
-use crate::compiler::{CompiledProgram, FunctionInfo, Opcode};
+use crate::compiler::{CompiledProgram, Opcode};
 use crate::gc::GarbageCollector;
 
 /// Trap codes for runtime errors (matching Python spec exactly)
@@ -618,11 +618,6 @@ impl<'a> Vm<'a> {
                 self.stack.push(ret);
                 Ok(false)
             }
-
-            _ => Err((
-                TrapCode::InvalidInstruction,
-                format!("Unknown opcode: {:?}", opcode),
-            )),
         }
     }
 

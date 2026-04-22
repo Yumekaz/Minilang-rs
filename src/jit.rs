@@ -540,14 +540,8 @@ pub struct JitCompiler {
     code: MachineCode,
     /// Bytecode PC to machine code offset mapping
     pc_to_offset: HashMap<usize, usize>,
-    /// Label counter
-    next_label: usize,
-    /// Global data area (allocated separately)
-    globals: Vec<i64>,
     /// Function entry points (bytecode PC)
     func_entries: HashMap<usize, usize>, // func_id -> entry_pc
-    /// Function machine code offsets
-    func_offsets: HashMap<usize, usize>, // func_id -> code offset
 }
 
 impl JitCompiler {
@@ -555,17 +549,8 @@ impl JitCompiler {
         Self {
             code: MachineCode::new(),
             pc_to_offset: HashMap::new(),
-            next_label: 0,
-            globals: Vec::new(),
             func_entries: HashMap::new(),
-            func_offsets: HashMap::new(),
         }
-    }
-
-    fn new_label(&mut self) -> usize {
-        let label = self.next_label;
-        self.next_label += 1;
-        label
     }
 
     /// Compile bytecode to native code
@@ -937,7 +922,6 @@ impl JitCompiler {
                 // Allocate array on stack - push the base address
                 // For simplicity, just use a large negative offset from RBP
                 // Unsupported by the current JIT program gate.
-                let size = instr.arg1;
                 // Use R13 as array allocation pointer (starts at RBP - 4096)
                 // Just push the current position as the array base
                 self.code.mov(Reg::Rax, Reg::Rbp);
@@ -981,15 +965,9 @@ impl JitCompiler {
 
             Opcode::ArrayNew => {
                 // Same as AllocArray
-                let size = instr.arg1;
                 self.code.mov(Reg::Rax, Reg::Rbp);
                 self.code.sub_imm(Reg::Rax, 4096);
                 self.code.push(Reg::Rax);
-            }
-
-            _ => {
-                // Unimplemented opcodes - emit a trap
-                self.code.emit(&[0xCC]); // int3
             }
         }
     }

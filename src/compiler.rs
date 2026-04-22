@@ -116,7 +116,6 @@ pub struct CompiledProgram {
 /// Local variable during compilation
 #[derive(Debug, Clone)]
 struct LocalVar {
-    name: String,
     slot: usize,
     is_array: bool,
     array_size: usize,
@@ -140,7 +139,6 @@ pub struct Compiler {
 
     // Constants pool
     constants: Vec<i32>,
-    const_map: HashMap<i32, usize>,
 
     // Arena allocator for string interning during compilation
     string_arena: crate::alloc::BumpAllocator,
@@ -160,7 +158,6 @@ impl Compiler {
             next_func_id: 0,
             main_func_id: None,
             constants: Vec::new(),
-            const_map: HashMap::new(),
             string_arena: crate::alloc::BumpAllocator::new(64 * 1024), // 64KB for strings
             interned_strings: 0,
         }
@@ -229,16 +226,6 @@ impl Compiler {
         self.instructions.len()
     }
 
-    fn add_constant(&mut self, value: i32) -> usize {
-        if let Some(&idx) = self.const_map.get(&value) {
-            return idx;
-        }
-        let idx = self.constants.len();
-        self.constants.push(value);
-        self.const_map.insert(value, idx);
-        idx
-    }
-
     fn collect_globals(&mut self, program: &Program) {
         for glob in &program.globals {
             let (slot, size) = if let Some(arr_size) = glob.array_size {
@@ -293,7 +280,6 @@ impl Compiler {
         // Allocate parameter slots
         for param in &func.params {
             let local = LocalVar {
-                name: param.name.clone(),
                 slot: self.next_local_slot,
                 is_array: false,
                 array_size: 0,
@@ -362,7 +348,6 @@ impl Compiler {
                         self.current_locals.insert(
                             name.clone(),
                             LocalVar {
-                                name: name.clone(),
                                 slot,
                                 is_array: array_size.is_some(),
                                 array_size: size,
@@ -412,7 +397,6 @@ impl Compiler {
                     self.current_locals.insert(
                         name.clone(),
                         LocalVar {
-                            name: name.clone(),
                             slot,
                             is_array: array_size.is_some(),
                             array_size: size,

@@ -51,8 +51,6 @@ pub struct HeapArray {
     data: Vec<i64>,
     /// Is this array still alive? (for GC)
     marked: bool,
-    /// Reference count (for debugging)
-    ref_count: u32,
 }
 
 impl HeapArray {
@@ -60,7 +58,6 @@ impl HeapArray {
         Self {
             data: vec![0; size],
             marked: false,
-            ref_count: 0,
         }
     }
 }
@@ -69,8 +66,6 @@ impl HeapArray {
 #[derive(Debug)]
 struct GcCallFrame {
     return_pc: usize,
-    base_ptr: usize,
-    func_id: usize,
     /// Local values for this frame
     locals: Vec<GcValue>,
     /// Initialization flags
@@ -78,11 +73,9 @@ struct GcCallFrame {
 }
 
 impl GcCallFrame {
-    fn new(local_count: usize, return_pc: usize, func_id: usize) -> Self {
+    fn new(local_count: usize, return_pc: usize) -> Self {
         Self {
             return_pc,
-            base_ptr: 0,
-            func_id,
             locals: vec![GcValue::Int(0); local_count],
             init_flags: vec![false; local_count],
         }
@@ -312,16 +305,6 @@ impl<'a> GcVm<'a> {
         }
     }
 
-    fn mark_array(&mut self, id: u32) {
-        if let Some(arr) = self
-            .heap_arrays
-            .get_mut(id as usize)
-            .and_then(|a| a.as_mut())
-        {
-            arr.marked = true;
-        }
-    }
-
     /// Pop value from stack
     fn pop(&mut self) -> Result<GcValue, (TrapCode, String)> {
         self.stack
@@ -377,7 +360,7 @@ impl<'a> GcVm<'a> {
         };
 
         // Initialize global arrays on heap
-        for (name, info) in &self.program.globals {
+        for info in self.program.globals.values() {
             if info.is_array {
                 let array_id = self.alloc_array(info.array_size);
                 self.globals[info.slot] = GcValue::ArrayRef(array_id);
@@ -386,11 +369,8 @@ impl<'a> GcVm<'a> {
 
         // Set up initial frame
         self.pc = main_func.entry_pc;
-        self.call_stack.push(GcCallFrame::new(
-            main_func.local_count,
-            usize::MAX,
-            main_func.id,
-        ));
+        self.call_stack
+            .push(GcCallFrame::new(main_func.local_count, usize::MAX));
 
         // Execute
         loop {
@@ -691,7 +671,7 @@ impl<'a> GcVm<'a> {
                 args.reverse();
 
                 // Create new frame
-                let mut new_frame = GcCallFrame::new(func.local_count, self.pc + 1, func_id);
+                let mut new_frame = GcCallFrame::new(func.local_count, self.pc + 1);
 
                 // Initialize parameters
                 for (i, arg) in args.into_iter().enumerate() {
