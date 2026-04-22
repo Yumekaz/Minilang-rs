@@ -1,16 +1,21 @@
 # MiniLang - A Systems Programming Language Compiler in Rust
 
 A minimal language compiler demonstrating core systems programming concepts:
-- **Custom memory allocators** (bump, free-list, slab)
-- **Mark-sweep garbage collector**
-- **x86-64 JIT compiler** with native code generation
-- **Bytecode VM** interpreter
+- **Bytecode VM** interpreter for the full language
+- **Optional GC VM** with heap-allocated arrays
+- **x86-64 JIT compiler** for simple single-function programs
+- **Custom memory allocators** (bump, free-list, slab), used selectively and benchmarked
 
 ## Building
 
 ```bash
 cargo build --release
 ```
+
+On Windows with the MSVC Rust toolchain, run from a Visual Studio Developer
+Command Prompt or ensure the Visual C++ Build Tools and Windows SDK are
+installed. If Git's `usr/bin/link.exe` appears before MSVC's linker on `PATH`,
+Rust may fail during linking.
 
 ## Usage
 
@@ -43,10 +48,15 @@ src/
 ├── parser.rs       # Recursive descent parser
 ├── sema.rs         # Semantic analyzer (type checking)
 ├── compiler.rs     # Bytecode compiler
+├── optimizer.rs    # Bytecode optimization passes
 ├── vm.rs           # Stack-based VM interpreter
+├── gc_vm.rs        # GC-integrated VM
 ├── jit.rs          # x86-64 JIT compiler
 ├── alloc.rs        # Custom memory allocators
-└── gc.rs           # Mark-sweep garbage collector
+├── gc.rs           # Mark-sweep garbage collector primitives
+├── runtime.rs      # GC-managed runtime value helpers
+├── arena_ast.rs    # Experimental arena-backed AST types
+└── repl.rs         # Interactive REPL
 ```
 
 ## Systems Engineering Features
@@ -67,12 +77,13 @@ Three allocator implementations:
    - Extremely fast for uniform allocations
    - No external fragmentation
 
-### Garbage Collector (`src/gc.rs`)
+### Garbage Collector (`src/gc.rs`, `src/gc_vm.rs`)
 
-Mark-sweep GC implementation:
+Mark-sweep GC primitives plus a GC-integrated VM path:
 - Object headers with type tags and mark bits
 - Root set management
 - Automatic collection at threshold
+- Heap arrays in `--gc` mode
 
 ### JIT Compiler (`src/jit.rs`)
 
@@ -80,6 +91,7 @@ x86-64 native code generation:
 - Direct machine code emission (no LLVM)
 - System V AMD64 ABI compliance
 - Executable memory via mmap/mprotect
+- Current scope: simple single-function programs; calls/recursion fall back to the VM
 
 ### Bytecode VM (`src/vm.rs`)
 

@@ -18,14 +18,15 @@ This is a complete rewrite of the MiniLang compiler from Python to Rust, with ad
 | Stack-based VM | ✅ | Explicit frame stack |
 | CLI flags | ✅ | --tokens, --ast, --ir, --debug, --bench, --stats, --opt, --repl, --eval |
 
-## Systems Programming Features (INTEGRATED, NOT DEMOS)
+## Systems Programming Features
 
-### 1. Arena Allocator for AST (`src/arena_ast.rs`)
+### 1. Memory Allocators and Arena Support (`src/alloc.rs`, `src/arena_ast.rs`)
 
-**Actually used for:**
-- Allocating AST nodes (expressions, statements)
-- Arena strings (zero-copy string interning)
-- Arena vectors (contiguous, cache-friendly)
+**Current status:**
+- The active parser builds the `ast.rs` boxed AST.
+- `arena_ast.rs` implements arena-backed AST nodes, arena strings, and arena vectors, but it is not the active parser representation.
+- The compiler uses `BumpAllocator` for identifier string interning/statistics.
+- `FreeListAllocator` and `SlabAllocator` are implemented and benchmarked, but they are not on the main compile/execute path.
 
 **Benefits:**
 - O(1) allocation (bump pointer)
@@ -35,7 +36,7 @@ This is a complete rewrite of the MiniLang compiler from Python to Rust, with ad
 
 ```rust
 pub struct AstArena {
-    bump: BumpAllocator,  // Actually allocates AST nodes
+    bump: BumpAllocator,
 }
 
 // Usage:
@@ -43,12 +44,12 @@ let arena = AstArena::new();
 let expr = arena.alloc_expr(ArenaExpr::IntLiteral { value: 42, span });
 ```
 
-### 2. GC-Managed Runtime Values (`src/runtime.rs`)
+### 2. GC-Managed Runtime Values (`src/runtime.rs`, `src/gc_vm.rs`)
 
-**Actually used for:**
-- Heap-allocated arrays (GcArray)
-- Root tracking in value stack
-- Frame-local GC roots
+**Current status:**
+- `GcVm` is the active `--gc` execution path and heap-allocates arrays as `HeapArray` values.
+- `runtime.rs` contains a richer `Value`/`GcArray` abstraction for GC-managed runtime values, but it is mostly support/test code at the moment.
+- The default `Vm` still stores local arrays in VM-owned slots rather than tracing them through `runtime.rs`.
 
 ```rust
 pub enum Value {
@@ -177,7 +178,7 @@ instruments -t "Time Profiler" ./target/release/minilang examples/bench.lang
 ## Interview Talking Points
 
 ### Memory Management
-"The project uses arena allocation for the AST - all nodes are allocated from a contiguous bump allocator, which gives O(1) allocation and perfect cache locality. For runtime values like arrays, I implemented a mark-sweep garbage collector that tracks roots through the value stack and call frames."
+"The project includes custom bump/free-list/slab allocators. The compiler currently uses the bump allocator for string interning, while arena-backed AST types are implemented separately but not wired into the parser. The `--gc` VM heap-allocates arrays and traces references from the stack, globals, and call frames."
 
 ### JIT Compilation  
 "The JIT compiler emits real x86-64 machine code - I handle REX prefixes for 64-bit operations, ModR/M byte encoding for register operands, and proper memory protection via mmap/mprotect. It follows the System V AMD64 calling convention."
@@ -191,6 +192,10 @@ instruments -t "Time Profiler" ./target/release/minilang examples/bench.lang
 ## Limitations
 
 - JIT only works on Linux x86-64
+- JIT only handles simple single-function programs; function calls fall back to the interpreter
+- JIT array operations do not currently preserve the VM's bounds-check safety
+- Arena-backed AST exists but is not the active parser representation
+- `runtime.rs` GC value abstractions are not the default VM value model
 - No register allocation in JIT (stack-based)
 - GC is stop-the-world (no concurrent collection)
 - Fixed cycle limit (100,000)

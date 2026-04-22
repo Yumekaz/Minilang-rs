@@ -86,7 +86,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
             let program = parser.parse().unwrap();
             let mut analyzer = SemanticAnalyzer::new();
             analyzer.analyze(&program).unwrap();
-            let compiled = Compiler::new().compile(&program);
+            let (compiled, _) = Compiler::new().compile(&program);
             let mut vm = Vm::new(&compiled);
             vm.run()
         })
@@ -100,7 +100,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
             let program = parser.parse().unwrap();
             let mut analyzer = SemanticAnalyzer::new();
             analyzer.analyze(&program).unwrap();
-            let compiled = Compiler::new().compile(&program);
+            let (compiled, _) = Compiler::new().compile(&program);
             let mut vm = Vm::new(&compiled).with_max_cycles(1_000_000);
             vm.run()
         })
@@ -119,7 +119,7 @@ fn bench_vm_execution(c: &mut Criterion) {
     let program = parser.parse().unwrap();
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(&program).unwrap();
-    let compiled = Compiler::new().compile(&program);
+    let (compiled, _) = Compiler::new().compile(&program);
 
     group.bench_function("loop_1000", |b| {
         b.iter(|| {
