@@ -66,14 +66,16 @@ impl Optimizer {
         let mut instructions = program.instructions;
         let mut functions = program.functions;
 
-        // Pass 1: Constant folding
-        instructions = self.constant_folding(instructions);
+        if Self::can_run_size_changing_passes(&instructions, &functions) {
+            // Pass 1: Constant folding
+            instructions = self.constant_folding(instructions);
 
-        // Pass 2: Strength reduction
-        instructions = self.strength_reduction(instructions);
+            // Pass 2: Strength reduction
+            instructions = self.strength_reduction(instructions);
 
-        // Pass 3: Peephole optimization
-        instructions = self.peephole_optimization(instructions);
+            // Pass 3: Peephole optimization
+            instructions = self.peephole_optimization(instructions);
+        }
 
         // Pass 4: Dead code elimination
         let (new_instructions, new_functions) = self.dead_code_elimination(instructions, functions);
@@ -96,6 +98,19 @@ impl Optimizer {
         &self.stats
     }
 
+    fn can_run_size_changing_passes(
+        instructions: &[Instruction],
+        functions: &HashMap<usize, FunctionInfo>,
+    ) -> bool {
+        functions.len() == 1
+            && !instructions.iter().any(|instr| {
+                matches!(
+                    instr.opcode,
+                    Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue
+                )
+            })
+    }
+
     /// Constant folding: evaluate constant expressions at compile time
     fn constant_folding(&mut self, instructions: Vec<Instruction>) -> Vec<Instruction> {
         let mut result = Vec::with_capacity(instructions.len());
@@ -116,7 +131,7 @@ impl Optimizer {
                         Opcode::Add => Some(Self::normalize_i32(a.wrapping_add(b))),
                         Opcode::Sub => Some(Self::normalize_i32(a.wrapping_sub(b))),
                         Opcode::Mul => Some(Self::normalize_i32(a.wrapping_mul(b))),
-                        Opcode::Div if b != 0 => Some(Self::normalize_i32(a / b)),
+                        Opcode::Div if b != 0 && !(a == i32::MIN as i64 && b == -1) => Some(a / b),
                         Opcode::Eq => Some(if a == b { 1 } else { 0 }),
                         Opcode::Ne => Some(if a != b { 1 } else { 0 }),
                         Opcode::Lt => Some(if a < b { 1 } else { 0 }),
@@ -231,13 +246,6 @@ impl Optimizer {
             if i + 1 < instructions.len() {
                 let i0 = &instructions[i];
                 let i1 = &instructions[i + 1];
-
-                // Pattern: LOAD_LOCAL x, POP -> nothing (dead load)
-                if i0.opcode == Opcode::LoadLocal && i1.opcode == Opcode::Pop {
-                    self.stats.peephole_optimizations += 1;
-                    i += 2;
-                    continue;
-                }
 
                 // Pattern: LOAD_CONST x, POP -> nothing (dead load)
                 if i0.opcode == Opcode::LoadConst && i1.opcode == Opcode::Pop {
@@ -471,6 +479,110 @@ mod tests {
         // LOAD_CONST 0 and ADD should be removed
         assert_eq!(optimized.instructions.len(), 2);
         assert!(opt.stats.strength_reductions > 0);
+    }
+
+    #[test]
+    fn test_peephole_keeps_load_local_pop() {
+        let program = make_program(vec![
+            Instruction::new(Opcode::LoadLocal, 0, 0),
+            Instruction::new(Opcode::Pop, 0, 0),
+            Instruction::new(Opcode::LoadConst, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0),
+        ]);
+
+        let mut opt = Optimizer::new();
+        let optimized = opt.optimize(program);
+
+        assert_eq!(optimized.instructions[0].opcode, Opcode::LoadLocal);
+        assert_eq!(optimized.instructions[1].opcode, Opcode::Pop);
+        assert_eq!(opt.stats.peephole_optimizations, 0);
+    }
+
+    #[test]
+    fn test_optimizer_skips_size_changes_when_jumps_are_present() {
+        let program = make_program(vec![
+            Instruction::new(Opcode::LoadConst, 1, 0),
+            Instruction::new(Opcode::LoadConst, 2, 0),
+            Instruction::new(Opcode::Add, 0, 0),
+            Instruction::new(Opcode::JumpIfFalse, 6, 0),
+            Instruction::new(Opcode::LoadConst, 7, 0),
+            Instruction::new(Opcode::Return, 0, 0),
+            Instruction::new(Opcode::LoadConst, 9, 0),
+            Instruction::new(Opcode::Return, 0, 0),
+        ]);
+
+        let mut opt = Optimizer::new();
+        let optimized = opt.optimize(program);
+
+        assert_eq!(optimized.instructions[0].opcode, Opcode::LoadConst);
+        assert_eq!(optimized.instructions[1].opcode, Opcode::LoadConst);
+        assert_eq!(optimized.instructions[2].opcode, Opcode::Add);
+        assert_eq!(optimized.instructions[3].arg1, 6);
+        assert_eq!(opt.stats.constants_folded, 0);
+    }
+
+    #[test]
+    fn test_optimizer_skips_size_changes_with_multiple_functions() {
+        let mut functions = HashMap::new();
+        functions.insert(
+            0,
+            FunctionInfo {
+                name: "main".to_string(),
+                id: 0,
+                entry_pc: 0,
+                param_count: 0,
+                local_count: 0,
+            },
+        );
+        functions.insert(
+            1,
+            FunctionInfo {
+                name: "helper".to_string(),
+                id: 1,
+                entry_pc: 4,
+                param_count: 0,
+                local_count: 0,
+            },
+        );
+
+        let program = CompiledProgram {
+            instructions: vec![
+                Instruction::new(Opcode::LoadConst, 1, 0),
+                Instruction::new(Opcode::LoadConst, 2, 0),
+                Instruction::new(Opcode::Add, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+                Instruction::new(Opcode::LoadConst, 3, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            functions,
+            globals: HashMap::new(),
+            main_func_id: 0,
+            constants: Vec::new(),
+        };
+
+        let mut opt = Optimizer::new();
+        let optimized = opt.optimize(program);
+
+        assert_eq!(optimized.instructions.len(), 6);
+        assert_eq!(optimized.functions[&1].entry_pc, 4);
+        assert_eq!(opt.stats.constants_folded, 0);
+    }
+
+    #[test]
+    fn test_constant_folding_skips_division_overflow_case() {
+        let program = make_program(vec![
+            Instruction::new(Opcode::LoadConst, i32::MIN, 0),
+            Instruction::new(Opcode::LoadConst, -1, 0),
+            Instruction::new(Opcode::Div, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0),
+        ]);
+
+        let mut opt = Optimizer::new();
+        let optimized = opt.optimize(program);
+
+        assert_eq!(optimized.instructions.len(), 4);
+        assert_eq!(optimized.instructions[2].opcode, Opcode::Div);
+        assert_eq!(opt.stats.constants_folded, 0);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Tests match the Python implementation behavior exactly.
 
-use minilang::{run, TrapCode};
+use minilang::{run, Compiler, Lexer, Optimizer, Parser, SemanticAnalyzer, TrapCode, Vm};
 
 fn run_expect(source: &str, expected: i64) {
     let result = run(source).expect("compilation failed");
@@ -18,6 +18,25 @@ fn run_expect_trap(source: &str, expected_trap: TrapCode) {
     let result = run(source).expect("compilation failed");
     assert!(!result.success, "expected trap but got success");
     assert_eq!(result.trap_code, expected_trap, "wrong trap code");
+}
+
+fn run_optimized(source: &str) -> minilang::VmResult {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize();
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse().expect("parse failed");
+
+    let mut analyzer = SemanticAnalyzer::new();
+    analyzer
+        .analyze(&program)
+        .expect("semantic analysis failed");
+
+    let (compiled, _) = Compiler::new().compile(&program);
+    let mut optimizer = Optimizer::new();
+    let optimized = optimizer.optimize(compiled);
+
+    let mut vm = Vm::new(&optimized);
+    vm.run()
 }
 
 // ============================================================================
@@ -297,6 +316,25 @@ fn test_trap_div_zero() {
 #[test]
 fn test_trap_undefined_local() {
     run_expect_trap("func main() { int x; return x; }", TrapCode::UndefinedLocal);
+}
+
+#[test]
+fn test_opt_preserves_undefined_local_expr_trap() {
+    let result = run_optimized("func main() { int x; x; return 0; }");
+    assert!(!result.success, "expected trap but got success");
+    assert_eq!(result.trap_code, TrapCode::UndefinedLocal);
+}
+
+#[test]
+fn test_opt_control_flow_keeps_jump_targets() {
+    let result =
+        run_optimized("func main() { int x = 1 + 2; if (x == 3) { return 7; } return 9; }");
+    assert!(
+        result.success,
+        "VM trap: {} ({:?})",
+        result.trap_message, result.trap_code
+    );
+    assert_eq!(result.return_value, 7);
 }
 
 #[test]
