@@ -558,7 +558,7 @@ impl<'a> Vm<'a> {
                 let size = Self::array_size(arg1)?;
                 // Use a simple bump allocation from the end of locals
                 let base = self.locals.len();
-                self.locals.extend(std::iter::repeat(0).take(size));
+                self.locals.extend(std::iter::repeat_n(0, size));
                 self.stack.push(base as i64);
                 Ok(true)
             }
@@ -600,9 +600,9 @@ impl<'a> Vm<'a> {
     fn normalize_i32(value: i64) -> i64 {
         let masked = value & 0xFFFFFFFF;
         if masked > 0x7FFFFFFF {
-            (masked as i64) - 0x100000000
+            masked - 0x100000000
         } else {
-            masked as i64
+            masked
         }
     }
 

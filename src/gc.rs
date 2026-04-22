@@ -181,7 +181,7 @@ impl GarbageCollector {
         // Create fat pointer
         let slice_ptr = std::ptr::slice_from_raw_parts_mut(ptr.as_ptr() as *mut i32, len);
         Some(GcPtr {
-            ptr: NonNull::new(slice_ptr as *mut [i32]).unwrap(),
+            ptr: NonNull::new(slice_ptr).unwrap(),
         })
     }
 
@@ -372,8 +372,7 @@ mod tests {
     fn test_basic_allocation() {
         let mut gc = GarbageCollector::new(1024 * 1024);
 
-        let ptr = gc.alloc(100, TypeTag::Blob).unwrap();
-        assert!(!ptr.as_ptr().is_null());
+        let _ptr = gc.alloc(100, TypeTag::Blob).unwrap();
         assert!(gc.bytes_allocated() > 0);
     }
 
@@ -407,16 +406,16 @@ mod tests {
         // Write to array
         unsafe {
             let slice = arr.as_mut();
-            for i in 0..10 {
-                slice[i] = i as i32;
+            for (i, item) in slice.iter_mut().enumerate().take(10) {
+                *item = i as i32;
             }
         }
 
         // Verify
         unsafe {
             let slice = arr.as_ref();
-            for i in 0..10 {
-                assert_eq!(slice[i], i as i32);
+            for (i, item) in slice.iter().enumerate().take(10) {
+                assert_eq!(*item, i as i32);
             }
         }
     }

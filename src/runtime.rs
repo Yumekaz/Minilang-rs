@@ -8,11 +8,11 @@
 //! - Closures (future: for first-class functions)
 //! - Strings (future: for string support)
 
-use crate::gc::{GarbageCollector, GcPtr, TypeTag};
+use crate::gc::{GarbageCollector, TypeTag};
 use std::ptr::NonNull;
 
 /// Runtime value that can be either immediate or heap-allocated
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum Value {
     /// Immediate integer (unboxed, no GC)
     Int(i64),
@@ -21,6 +21,7 @@ pub enum Value {
     /// Heap-allocated array (GC-managed)
     Array(GcArray),
     /// Null/uninitialized
+    #[default]
     Null,
 }
 
@@ -78,12 +79,6 @@ impl std::fmt::Debug for Value {
             Value::Array(arr) => write!(f, "Array(len={})", arr.len),
             Value::Null => write!(f, "Null"),
         }
-    }
-}
-
-impl Default for Value {
-    fn default() -> Self {
-        Value::Null
     }
 }
 

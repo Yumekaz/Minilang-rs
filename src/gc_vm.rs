@@ -8,9 +8,7 @@
 
 use crate::alloc::BumpAllocator;
 use crate::compiler::{CompiledProgram, Opcode};
-use crate::gc::{GarbageCollector, TypeTag};
 use crate::vm::TrapCode;
-use std::collections::HashMap;
 
 /// A value that can be either immediate or a heap reference
 #[derive(Clone, Copy, Debug)]
@@ -323,9 +321,9 @@ impl<'a> GcVm<'a> {
     fn normalize_i32(value: i64) -> i64 {
         let masked = value & 0xFFFFFFFF;
         if masked > 0x7FFFFFFF {
-            (masked as i64) - 0x100000000
+            masked - 0x100000000
         } else {
-            masked as i64
+            masked
         }
     }
 

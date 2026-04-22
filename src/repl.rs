@@ -142,7 +142,7 @@ impl Repl {
     fn handle_command(&mut self, cmd: &str) -> Result<bool, String> {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
 
-        match parts.get(0).map(|s| *s) {
+        match parts.first().copied() {
             Some(":quit") | Some(":q") => Ok(false),
 
             Some(":help") | Some(":h") => {
@@ -247,9 +247,7 @@ impl Repl {
             .next()
             .and_then(|s| s.split_whitespace().last())
         {
-            self.function_stats
-                .entry(name.to_string())
-                .or_insert_with(FunctionStats::default);
+            self.function_stats.entry(name.to_string()).or_default();
             println!("Defined function: {}", name);
         }
 

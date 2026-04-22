@@ -536,15 +536,15 @@ mod tests {
     fn test_free_list_allocator() {
         let fl = FreeListAllocator::new(4096);
 
-        let p1 = fl.alloc(100).unwrap();
+        let _p1 = fl.alloc(100).unwrap();
         let p2 = fl.alloc(200).unwrap();
-        let p3 = fl.alloc(100).unwrap();
+        let _p3 = fl.alloc(100).unwrap();
 
         // Free middle allocation
         unsafe { fl.free(p2) };
 
         // Allocate again - should reuse freed space
-        let p4 = fl.alloc(150).unwrap();
+        let _p4 = fl.alloc(150).unwrap();
 
         let stats = fl.stats();
         assert_eq!(stats.allocation_count, 3);

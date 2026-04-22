@@ -169,7 +169,7 @@ impl MachineCode {
         self.emit_u8(0x8B);
         if offset == 0 && (src as u8) != 5 {
             self.modrm(0b00, dst, src);
-        } else if offset >= -128 && offset <= 127 {
+        } else if (-128..=127).contains(&offset) {
             self.modrm(0b01, dst, src);
             self.emit_u8(offset as u8);
         } else {
@@ -188,7 +188,7 @@ impl MachineCode {
         self.emit_u8(0x89);
         if offset == 0 && (dst as u8) != 5 {
             self.modrm(0b00, src, dst);
-        } else if offset >= -128 && offset <= 127 {
+        } else if (-128..=127).contains(&offset) {
             self.modrm(0b01, src, dst);
             self.emit_u8(offset as u8);
         } else {
@@ -211,7 +211,7 @@ impl MachineCode {
     /// add dst, imm32
     pub fn add_imm(&mut self, dst: Reg, imm: i32) {
         self.rex_w(Reg::Rax, dst);
-        if imm >= -128 && imm <= 127 {
+        if (-128..=127).contains(&imm) {
             self.emit_u8(0x83);
             self.modrm(0b11, Reg::Rax, dst);
             self.emit_u8(imm as u8);
@@ -232,7 +232,7 @@ impl MachineCode {
     /// sub dst, imm32
     pub fn sub_imm(&mut self, dst: Reg, imm: i32) {
         self.rex_w(Reg::Rax, dst);
-        if imm >= -128 && imm <= 127 {
+        if (-128..=127).contains(&imm) {
             self.emit_u8(0x83);
             self.modrm(0b11, Reg::Rbp, dst); // /5 for sub
             self.emit_u8(imm as u8);
@@ -267,7 +267,7 @@ impl MachineCode {
     /// cmp dst, imm32
     pub fn cmp_imm(&mut self, dst: Reg, imm: i32) {
         self.rex_w(Reg::Rax, dst);
-        if imm >= -128 && imm <= 127 {
+        if (-128..=127).contains(&imm) {
             self.emit_u8(0x83);
             self.modrm(0b11, Reg::Rdi, dst); // /7 for cmp
             self.emit_u8(imm as u8);
@@ -671,13 +671,13 @@ impl JitCompiler {
 
             Opcode::LoadLocal => {
                 // Load from stack frame
-                let offset = -(8 + instr.arg1 as i32 * 8);
+                let offset = -(8 + instr.arg1 * 8);
                 self.code.mov_load(Reg::Rax, Reg::Rbp, offset);
                 self.code.push(Reg::Rax);
             }
 
             Opcode::StoreLocal => {
-                let offset = -(8 + instr.arg1 as i32 * 8);
+                let offset = -(8 + instr.arg1 * 8);
                 self.code.pop(Reg::Rax);
                 self.code.mov_store(Reg::Rbp, offset, Reg::Rax);
             }
@@ -847,13 +847,13 @@ impl JitCompiler {
             Opcode::LoadGlobal => {
                 // Globals are stored at RBP - 512 - slot*8
                 // (after 256 bytes of locals, we have 256*8 bytes for globals)
-                let offset = -(512 + instr.arg1 as i32 * 8);
+                let offset = -(512 + instr.arg1 * 8);
                 self.code.mov_load(Reg::Rax, Reg::Rbp, offset);
                 self.code.push(Reg::Rax);
             }
 
             Opcode::StoreGlobal => {
-                let offset = -(512 + instr.arg1 as i32 * 8);
+                let offset = -(512 + instr.arg1 * 8);
                 self.code.pop(Reg::Rax);
                 self.code.mov_store(Reg::Rbp, offset, Reg::Rax);
             }
@@ -893,7 +893,7 @@ impl JitCompiler {
                 let base_slot = instr.arg1;
                 self.code.pop(Reg::Rcx); // Index
                                          // Load array base address from local
-                let slot_offset = -(8 + base_slot as i32 * 8);
+                let slot_offset = -(8 + base_slot * 8);
                 self.code.mov_load(Reg::Rax, Reg::Rbp, slot_offset);
                 // Add index * 8
                 self.code.emit(&[0x48, 0xC1, 0xE1, 0x03]); // shl rcx, 3
@@ -909,7 +909,7 @@ impl JitCompiler {
                 self.code.pop(Reg::Rdx); // Value
                 self.code.pop(Reg::Rcx); // Index
                                          // Load array base address
-                let slot_offset = -(8 + base_slot as i32 * 8);
+                let slot_offset = -(8 + base_slot * 8);
                 self.code.mov_load(Reg::Rax, Reg::Rbp, slot_offset);
                 // Add index * 8
                 self.code.emit(&[0x48, 0xC1, 0xE1, 0x03]); // shl rcx, 3

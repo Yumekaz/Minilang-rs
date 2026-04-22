@@ -376,9 +376,9 @@ impl Optimizer {
     fn normalize_i32(value: i64) -> i64 {
         let masked = value & 0xFFFFFFFF;
         if masked > 0x7FFFFFFF {
-            (masked as i64) - 0x100000000
+            masked - 0x100000000
         } else {
-            masked as i64
+            masked
         }
     }
 }
@@ -466,7 +466,7 @@ mod tests {
         ]);
 
         let mut opt = Optimizer::new();
-        let optimized = opt.optimize(program);
+        let _optimized = opt.optimize(program);
 
         // Should become: LOAD_LOCAL, POP, LOAD_CONST 0, RETURN
         assert!(opt.stats.strength_reductions > 0);

@@ -338,23 +338,22 @@ impl Compiler {
             match stmt {
                 Stmt::VarDecl {
                     name, array_size, ..
-                } => {
-                    if !self.current_locals.contains_key(name) {
-                        // Arrays only need 1 slot for the reference
-                        let slot = self.next_local_slot;
-                        self.next_local_slot += 1;
-                        let size = array_size.map(|s| s as usize).unwrap_or(0);
+                } if !self.current_locals.contains_key(name) => {
+                    // Arrays only need 1 slot for the reference
+                    let slot = self.next_local_slot;
+                    self.next_local_slot += 1;
+                    let size = array_size.map(|s| s as usize).unwrap_or(0);
 
-                        self.current_locals.insert(
-                            name.clone(),
-                            LocalVar {
-                                slot,
-                                is_array: array_size.is_some(),
-                                array_size: size,
-                            },
-                        );
-                    }
+                    self.current_locals.insert(
+                        name.clone(),
+                        LocalVar {
+                            slot,
+                            is_array: array_size.is_some(),
+                            array_size: size,
+                        },
+                    );
                 }
+                Stmt::VarDecl { .. } => {}
                 Stmt::If {
                     then_body,
                     else_body,
