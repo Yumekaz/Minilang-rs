@@ -247,14 +247,14 @@ impl Verifier {
                 continue;
             }
 
-            for slot in info.slot..end {
-                if claimed[slot] {
+            for (slot, is_claimed) in claimed.iter_mut().enumerate().skip(info.slot).take(width) {
+                if *is_claimed {
                     errors.push(VerificationError::new(
                         None,
                         format!("global '{}' overlaps slot {}", info.name, slot),
                     ));
                 }
-                claimed[slot] = true;
+                *is_claimed = true;
             }
         }
     }
@@ -310,19 +310,27 @@ impl Verifier {
 
         entries.sort_by_key(|(entry_pc, _, _)| *entry_pc);
 
-        let mut ranges = Vec::with_capacity(entries.len());
-        for i in 0..entries.len() {
-            let (start, id, info) = entries[i].clone();
-            let end = entries
-                .get(i + 1)
-                .map(|(next_start, _, _)| *next_start)
-                .unwrap_or(program.instructions.len());
+        let mut ranges = entries
+            .windows(2)
+            .map(|window| {
+                let (start, id, info) = &window[0];
+                let end = window[1].0;
 
+                FunctionRange {
+                    id: *id,
+                    info: info.clone(),
+                    start: *start,
+                    end,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if let Some((start, id, info)) = entries.last() {
             ranges.push(FunctionRange {
-                id,
-                info,
-                start,
-                end,
+                id: *id,
+                info: info.clone(),
+                start: *start,
+                end: program.instructions.len(),
             });
         }
 
@@ -339,8 +347,8 @@ impl Verifier {
         let mut max_stack_depth = 0usize;
 
         let mut initialized_locals = vec![false; range.info.local_count];
-        for slot in 0..range.info.param_count.min(initialized_locals.len()) {
-            initialized_locals[slot] = true;
+        for initialized in initialized_locals.iter_mut().take(range.info.param_count) {
+            *initialized = true;
         }
 
         states.insert(
