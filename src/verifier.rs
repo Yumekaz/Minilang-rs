@@ -852,35 +852,41 @@ impl Verifier {
     }
 
     fn jit_status(&self, program: &CompiledProgram) -> BackendStatus {
-        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            return BackendStatus::no("current build target is not linux x86-64");
+        jit_status_for_target(program)
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn jit_status_for_target(program: &CompiledProgram) -> BackendStatus {
+    if program.functions.len() != 1 {
+        return BackendStatus::no("JIT requires exactly one function");
+    }
+
+    let Some(main_func) = program.functions.get(&program.main_func_id) else {
+        return BackendStatus::no("missing main function metadata");
+    };
+
+    let mut saw_return = false;
+    for instr in program.instructions.iter().skip(main_func.entry_pc) {
+        if !jit_supports_opcode(instr.opcode) {
+            return BackendStatus::no(format!("unsupported opcode {:?}", instr.opcode));
         }
-
-        if program.functions.len() != 1 {
-            return BackendStatus::no("JIT requires exactly one function");
-        }
-
-        let Some(main_func) = program.functions.get(&program.main_func_id) else {
-            return BackendStatus::no("missing main function metadata");
-        };
-
-        let mut saw_return = false;
-        for instr in program.instructions.iter().skip(main_func.entry_pc) {
-            if !jit_supports_opcode(instr.opcode) {
-                return BackendStatus::no(format!("unsupported opcode {:?}", instr.opcode));
-            }
-            if matches!(instr.opcode, Opcode::Return) {
-                saw_return = true;
-                break;
-            }
-        }
-
-        if saw_return {
-            BackendStatus::yes()
-        } else {
-            BackendStatus::no("main function has no return")
+        if matches!(instr.opcode, Opcode::Return) {
+            saw_return = true;
+            break;
         }
     }
+
+    if saw_return {
+        BackendStatus::yes()
+    } else {
+        BackendStatus::no("main function has no return")
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn jit_status_for_target(_program: &CompiledProgram) -> BackendStatus {
+    BackendStatus::no("current build target is not linux x86-64")
 }
 
 impl std::fmt::Display for VerificationReport {
