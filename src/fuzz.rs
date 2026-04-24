@@ -1,9 +1,10 @@
 //! Deterministic self-audit fuzzer for MiniLang.
 //!
-//! The generator deliberately starts with a scalar, terminating subset. That
-//! keeps failures actionable: when the verifier, backend comparator, trace
-//! replay, or trace diff reports a problem, it is likely a runtime/compiler bug
-//! rather than random invalid input.
+//! The generator deliberately stays in a terminating subset with initialized
+//! scalars and in-bounds global array access. That keeps failures actionable:
+//! when the verifier, backend comparator, trace replay, or trace diff reports a
+//! problem, it is likely a runtime/compiler bug rather than random invalid
+//! input.
 
 use crate::compiler::disassemble;
 use crate::gc_vm::GcVm;
@@ -70,6 +71,12 @@ struct HelperSig {
     arity: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ArrayBinding {
+    name: String,
+    size: usize,
+}
+
 struct GeneratedProgram {
     source: String,
 }
@@ -80,6 +87,7 @@ struct ProgramGenerator {
     max_statements: usize,
     helpers: Vec<HelperSig>,
     globals: Vec<String>,
+    arrays: Vec<ArrayBinding>,
     locals: Vec<String>,
     next_var: usize,
 }
@@ -300,6 +308,7 @@ impl ProgramGenerator {
             max_statements,
             helpers: Vec::new(),
             globals: Vec::new(),
+            arrays: Vec::new(),
             locals: Vec::new(),
             next_var: 0,
         }
@@ -320,7 +329,19 @@ impl ProgramGenerator {
             self.globals.push(name.clone());
             source.push_str(&format!("int {} = {};\n", name, self.small_literal()));
         }
-        if count > 0 {
+
+        let array_count = 1 + self.rng.usize(3);
+        for index in 0..array_count {
+            let name = format!("ga{}", index);
+            let size = 2 + self.rng.usize(5);
+            self.arrays.push(ArrayBinding {
+                name: name.clone(),
+                size,
+            });
+            source.push_str(&format!("int {}[{}];\n", name, size));
+        }
+
+        if count > 0 || array_count > 0 {
             source.push('\n');
         }
     }
@@ -344,13 +365,14 @@ impl ProgramGenerator {
                 .map(|param| format!("p{}", param))
                 .collect::<Vec<_>>();
             let mut vars = params.clone();
-            let base_expr = self.int_expr_from(&vars, &[], self.max_expr_depth);
+            let arrays = self.arrays.clone();
+            let base_expr = self.int_expr_from(&vars, &[], &arrays, self.max_expr_depth);
             source.push_str(&format!("  int h{} = {};\n", index, base_expr));
             vars.push(format!("h{}", index));
 
-            let condition = self.condition_from(&vars, &[]);
-            let then_expr = self.int_expr_from(&vars, &[], self.max_expr_depth);
-            let else_expr = self.int_expr_from(&vars, &[], self.max_expr_depth);
+            let condition = self.condition_from(&vars, &[], &arrays);
+            let then_expr = self.int_expr_from(&vars, &[], &arrays, self.max_expr_depth);
+            let else_expr = self.int_expr_from(&vars, &[], &arrays, self.max_expr_depth);
             source.push_str(&format!("  if ({}) {{\n", condition));
             source.push_str(&format!("    h{} = {};\n", index, then_expr));
             source.push_str("  } else {\n");
@@ -382,12 +404,14 @@ impl ProgramGenerator {
     }
 
     fn generate_main_statement(&mut self, source: &mut String) {
-        match self.rng.usize(6) {
+        match self.rng.usize(8) {
             0 => self.generate_local_decl(source),
             1 => self.generate_assignment(source),
             2 => self.generate_acc_update(source),
             3 => self.generate_if(source),
             4 => self.generate_bounded_loop(source),
+            5 => self.generate_array_store(source),
+            6 => self.generate_array_acc_update(source),
             _ => self.generate_print(source),
         }
     }
@@ -440,6 +464,23 @@ impl ProgramGenerator {
         source.push_str(&format!("  print {};\n", expr));
     }
 
+    fn generate_array_store(&mut self, source: &mut String) {
+        let Some((name, index)) = self.array_access() else {
+            self.generate_assignment(source);
+            return;
+        };
+        let expr = self.int_expr();
+        source.push_str(&format!("  {}[{}] = {};\n", name, index, expr));
+    }
+
+    fn generate_array_acc_update(&mut self, source: &mut String) {
+        let Some(read) = self.array_read_expr() else {
+            self.generate_acc_update(source);
+            return;
+        };
+        source.push_str(&format!("  acc = (acc + {});\n", read));
+    }
+
     fn fresh_local(&mut self) -> String {
         let name = format!("v{}", self.next_var);
         self.next_var += 1;
@@ -454,40 +495,56 @@ impl ProgramGenerator {
     fn int_expr(&mut self) -> String {
         let locals = self.locals.clone();
         let globals = self.globals.clone();
-        self.int_expr_from(&locals, &globals, self.max_expr_depth)
+        let arrays = self.arrays.clone();
+        self.int_expr_from(&locals, &globals, &arrays, self.max_expr_depth)
     }
 
     fn condition(&mut self) -> String {
         let locals = self.locals.clone();
         let globals = self.globals.clone();
-        self.condition_from(&locals, &globals)
+        let arrays = self.arrays.clone();
+        self.condition_from(&locals, &globals, &arrays)
     }
 
-    fn condition_from(&mut self, vars: &[String], globals: &[String]) -> String {
-        let left = self.int_expr_from(vars, globals, 1);
-        let right = self.int_expr_from(vars, globals, 1);
+    fn condition_from(
+        &mut self,
+        vars: &[String],
+        globals: &[String],
+        arrays: &[ArrayBinding],
+    ) -> String {
+        let left = self.int_expr_from(vars, globals, arrays, 1);
+        let right = self.int_expr_from(vars, globals, arrays, 1);
         let op = ["==", "!=", "<", ">", "<=", ">="][self.rng.usize(6)];
         format!("({} {} {})", left, op, right)
     }
 
-    fn int_expr_from(&mut self, vars: &[String], globals: &[String], depth: usize) -> String {
+    fn int_expr_from(
+        &mut self,
+        vars: &[String],
+        globals: &[String],
+        arrays: &[ArrayBinding],
+        depth: usize,
+    ) -> String {
         if depth == 0 {
-            return self.leaf_expr(vars, globals);
+            return self.leaf_expr(vars, globals, arrays);
         }
 
         match self.rng.usize(8) {
-            0 => self.leaf_expr(vars, globals),
-            1 => format!("(-{})", self.int_expr_from(vars, globals, depth - 1)),
-            2 => self.binary_expr(vars, globals, depth, "+"),
-            3 => self.binary_expr(vars, globals, depth, "-"),
-            4 => self.binary_expr(vars, globals, depth, "*"),
+            0 => self.leaf_expr(vars, globals, arrays),
+            1 => format!(
+                "(-{})",
+                self.int_expr_from(vars, globals, arrays, depth - 1)
+            ),
+            2 => self.binary_expr(vars, globals, arrays, depth, "+"),
+            3 => self.binary_expr(vars, globals, arrays, depth, "-"),
+            4 => self.binary_expr(vars, globals, arrays, depth, "*"),
             5 => format!(
                 "({} / {})",
-                self.int_expr_from(vars, globals, depth - 1),
+                self.int_expr_from(vars, globals, arrays, depth - 1),
                 self.nonzero_literal()
             ),
-            6 if !self.helpers.is_empty() => self.call_expr(vars, globals, depth),
-            _ => self.leaf_expr(vars, globals),
+            6 if !self.helpers.is_empty() => self.call_expr(vars, globals, arrays, depth),
+            _ => self.leaf_expr(vars, globals, arrays),
         }
     }
 
@@ -495,25 +552,44 @@ impl ProgramGenerator {
         &mut self,
         vars: &[String],
         globals: &[String],
+        arrays: &[ArrayBinding],
         depth: usize,
         op: &str,
     ) -> String {
-        let left = self.int_expr_from(vars, globals, depth - 1);
-        let right = self.int_expr_from(vars, globals, depth - 1);
+        let left = self.int_expr_from(vars, globals, arrays, depth - 1);
+        let right = self.int_expr_from(vars, globals, arrays, depth - 1);
         format!("({} {} {})", left, op, right)
     }
 
-    fn call_expr(&mut self, vars: &[String], globals: &[String], depth: usize) -> String {
+    fn call_expr(
+        &mut self,
+        vars: &[String],
+        globals: &[String],
+        arrays: &[ArrayBinding],
+        depth: usize,
+    ) -> String {
         let helper_index = self.rng.usize(self.helpers.len());
         let helper = self.helpers[helper_index].clone();
         let args = (0..helper.arity)
-            .map(|_| self.int_expr_from(vars, globals, depth - 1))
+            .map(|_| self.int_expr_from(vars, globals, arrays, depth - 1))
             .collect::<Vec<_>>()
             .join(", ");
         format!("{}({})", helper.name, args)
     }
 
-    fn leaf_expr(&mut self, vars: &[String], globals: &[String]) -> String {
+    fn leaf_expr(
+        &mut self,
+        vars: &[String],
+        globals: &[String],
+        arrays: &[ArrayBinding],
+    ) -> String {
+        if !arrays.is_empty() && self.rng.chance(1, 4) {
+            let index = self.rng.usize(arrays.len());
+            let array = &arrays[index];
+            let element = self.rng.usize(array.size);
+            return format!("{}[{}]", array.name, element);
+        }
+
         let total_names = vars.len() + globals.len();
         if total_names > 0 && self.rng.chance(3, 5) {
             let index = self.rng.usize(total_names);
@@ -525,6 +601,22 @@ impl ProgramGenerator {
         } else {
             self.small_literal().to_string()
         }
+    }
+
+    fn array_read_expr(&mut self) -> Option<String> {
+        self.array_access()
+            .map(|(name, index)| format!("{}[{}]", name, index))
+    }
+
+    fn array_access(&mut self) -> Option<(String, usize)> {
+        if self.arrays.is_empty() {
+            return None;
+        }
+
+        let array_index = self.rng.usize(self.arrays.len());
+        let array = &self.arrays[array_index];
+        let element_index = self.rng.usize(array.size);
+        Some((array.name.clone(), element_index))
     }
 
     fn small_literal(&mut self) -> i32 {
@@ -638,6 +730,19 @@ mod tests {
         let report = run_fuzzer(config);
         assert!(report.success, "{report:#?}");
         assert_eq!(report.cases_executed, 12);
+    }
+
+    #[test]
+    fn generated_program_contains_global_arrays() {
+        let generated =
+            ProgramGenerator::new(4321, DEFAULT_MAX_EXPR_DEPTH, DEFAULT_MAX_STATEMENTS).generate();
+
+        assert!(generated.source.contains("int ga0["));
+        assert!(
+            audit_source(&generated.source).is_none(),
+            "{}",
+            generated.source
+        );
     }
 
     #[test]

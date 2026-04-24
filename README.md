@@ -150,7 +150,8 @@ Trace-level determinism and divergence reports:
 ### Self-Audit Fuzzer (`src/fuzz.rs`)
 
 Deterministic generated-program testing:
-- `--fuzz <cases>` generates valid, terminating scalar MiniLang programs from a seed
+- `--fuzz <cases>` generates valid, terminating MiniLang programs from a seed
+- Generated programs cover initialized scalars, bounded loops, helper functions, prints, and in-bounds global array reads/writes
 - Every case runs compile, verification, backend comparison, trace replay, and VM/GC trace diff
 - On first failure, the fuzzer shrinks the repro and writes source, bytecode, traces, and failure metadata under `fuzz-artifacts/`
 - CI runs a fixed-seed fuzz audit on Linux and uploads `fuzz-artifacts/` when the fuzz step fails
