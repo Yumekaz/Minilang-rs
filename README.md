@@ -32,6 +32,9 @@ Rust may fail during linking.
 # Verify bytecode safety and backend eligibility
 ./target/release/minilang examples/fibonacci.lang --verify
 
+# Compare observable behavior across VM backends
+./target/release/minilang examples/fibonacci.lang --compare-backends
+
 # Benchmark mode
 ./target/release/minilang examples/fibonacci.lang --bench
 
@@ -110,6 +113,13 @@ Structural verifier for compiled bytecode:
 - Checks stack effects, jump targets, local/global slot bounds, function call arity, and array metadata
 - Reports maximum stack depth, estimated frame depth, possible runtime traps, and backend eligibility
 - Powers the `--verify` CLI mode as the foundation for backend equivalence and trace tooling
+
+### Backend Comparator (`src/compare.rs`)
+
+Self-auditing runtime comparison:
+- Runs the same bytecode through the standard VM, GC VM, optimized VM, and JIT when eligible
+- Compares observable behavior: success/trap status, return value, trap code, and output
+- Powers the `--compare-backends` CLI mode for equivalence checks
 
 ## Benchmarking
 

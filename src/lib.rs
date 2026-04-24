@@ -18,6 +18,7 @@
 pub mod alloc;
 pub mod arena_ast;
 pub mod ast;
+pub mod compare;
 pub mod compiler;
 pub mod gc;
 pub mod gc_vm;
@@ -36,6 +37,9 @@ pub mod vm;
 pub use alloc::{AllocatorStats, BumpAllocator, FreeListAllocator, SlabAllocator};
 pub use arena_ast::{ArenaExpr, ArenaStmt, ArenaStr, ArenaVec, AstArena};
 pub use ast::{BinaryOp, Expr, Function, Program, Stmt, Type, UnaryOp};
+pub use compare::{
+    compare_backends, BackendComparisonReport, BackendOutcome, BackendRun, BackendRunStatus,
+};
 pub use compiler::{CompiledProgram, Compiler, Opcode};
 pub use gc::{GarbageCollector, GcStats, TypeTag};
 pub use gc_vm::{GcValue, GcVm, GcVmResult, HeapArray};

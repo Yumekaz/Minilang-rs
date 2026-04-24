@@ -104,7 +104,7 @@ pub struct GlobalInfo {
 }
 
 /// Compiled program
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompiledProgram {
     pub instructions: Vec<Instruction>,
     pub functions: HashMap<usize, FunctionInfo>,
