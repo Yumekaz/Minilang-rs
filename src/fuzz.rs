@@ -421,7 +421,7 @@ impl ProgramGenerator {
         }
     }
 
-    fn generate_local_array_smoke(&mut self, source: &mut String) {
+    fn generate_local_array_smoke(&self, source: &mut String) {
         if let Some(array) = self.local_arrays.first() {
             source.push_str(&format!("  {}[0] = acc;\n", array.name));
             source.push_str(&format!("  acc = (acc + {}[0]);\n", array.name));

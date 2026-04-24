@@ -474,7 +474,10 @@ mod tests {
             ..left.clone()
         };
 
-        assert!(first_trace_divergence(&[left.clone()], &[right.clone()]).is_some());
+        assert!(
+            first_trace_divergence(std::slice::from_ref(&left), std::slice::from_ref(&right))
+                .is_some()
+        );
         assert!(first_semantic_trace_divergence(&[left], &[right]).is_none());
     }
 }
