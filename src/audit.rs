@@ -5,7 +5,7 @@
 
 use crate::compiler::CompiledProgram;
 use crate::gc_vm::{GcVm, GcVmResult};
-use crate::trace::{first_trace_divergence, TraceDivergence};
+use crate::trace::{first_semantic_trace_divergence, first_trace_divergence, TraceDivergence};
 use crate::vm::{TrapCode, Vm, VmResult};
 use std::fmt;
 
@@ -81,7 +81,7 @@ pub fn diff_vm_gc_traces(program: &CompiledProgram) -> BackendTraceDiffReport {
     let left_outcome = ExecutionSummary::from_vm(vm_result);
     let right_outcome = ExecutionSummary::from_gc_vm(gc_result);
     let outcome_mismatch = outcome_mismatch(&left_outcome, &right_outcome);
-    let divergence = first_trace_divergence(&vm_trace, gc_trace);
+    let divergence = first_semantic_trace_divergence(&vm_trace, gc_trace);
 
     BackendTraceDiffReport {
         equivalent: outcome_mismatch.is_none() && divergence.is_none(),

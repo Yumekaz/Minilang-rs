@@ -59,7 +59,8 @@ pub use runtime::{GcArray, GlobalStore, LocalFrame, Value, ValueStack};
 pub use sema::SemanticAnalyzer;
 pub use token::{Span, Token, TokenKind};
 pub use trace::{
-    events_to_json, first_trace_divergence, TraceDivergence, TraceEvent, TraceOutcome,
+    events_to_json, first_semantic_trace_divergence, first_trace_divergence, TraceDivergence,
+    TraceEvent, TraceOutcome,
 };
 pub use verifier::{
     BackendEligibility, BackendStatus, FunctionVerification, VerificationError, VerificationReport,

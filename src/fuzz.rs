@@ -1,7 +1,7 @@
 //! Deterministic self-audit fuzzer for MiniLang.
 //!
 //! The generator deliberately stays in a terminating subset with initialized
-//! scalars and in-bounds global array access. That keeps failures actionable:
+//! scalars and in-bounds global/local array access. That keeps failures actionable:
 //! when the verifier, backend comparator, trace replay, or trace diff reports a
 //! problem, it is likely a runtime/compiler bug rather than random invalid
 //! input.
@@ -88,6 +88,7 @@ struct ProgramGenerator {
     helpers: Vec<HelperSig>,
     globals: Vec<String>,
     arrays: Vec<ArrayBinding>,
+    local_arrays: Vec<ArrayBinding>,
     locals: Vec<String>,
     next_var: usize,
 }
@@ -309,6 +310,7 @@ impl ProgramGenerator {
             helpers: Vec::new(),
             globals: Vec::new(),
             arrays: Vec::new(),
+            local_arrays: Vec::new(),
             locals: Vec::new(),
             next_var: 0,
         }
@@ -387,11 +389,14 @@ impl ProgramGenerator {
 
     fn generate_main(&mut self, source: &mut String) {
         self.locals.clear();
+        self.local_arrays.clear();
         self.next_var = 0;
 
         source.push_str("func main() {\n");
         source.push_str(&format!("  int acc = {};\n", self.small_literal()));
         self.locals.push("acc".to_string());
+        self.generate_local_arrays(source);
+        self.generate_local_array_smoke(source);
 
         let statement_count = 4 + self.rng.usize(self.max_statements.saturating_sub(3));
         for _ in 0..statement_count {
@@ -401,6 +406,26 @@ impl ProgramGenerator {
         let return_expr = self.int_expr();
         source.push_str(&format!("  return {};\n", return_expr));
         source.push_str("}\n");
+    }
+
+    fn generate_local_arrays(&mut self, source: &mut String) {
+        let count = 1 + self.rng.usize(2);
+        for index in 0..count {
+            let name = format!("la{}", index);
+            let size = 2 + self.rng.usize(5);
+            self.local_arrays.push(ArrayBinding {
+                name: name.clone(),
+                size,
+            });
+            source.push_str(&format!("  int {}[{}];\n", name, size));
+        }
+    }
+
+    fn generate_local_array_smoke(&mut self, source: &mut String) {
+        if let Some(array) = self.local_arrays.first() {
+            source.push_str(&format!("  {}[0] = acc;\n", array.name));
+            source.push_str(&format!("  acc = (acc + {}[0]);\n", array.name));
+        }
     }
 
     fn generate_main_statement(&mut self, source: &mut String) {
@@ -495,15 +520,21 @@ impl ProgramGenerator {
     fn int_expr(&mut self) -> String {
         let locals = self.locals.clone();
         let globals = self.globals.clone();
-        let arrays = self.arrays.clone();
+        let arrays = self.arrays_in_scope();
         self.int_expr_from(&locals, &globals, &arrays, self.max_expr_depth)
     }
 
     fn condition(&mut self) -> String {
         let locals = self.locals.clone();
         let globals = self.globals.clone();
-        let arrays = self.arrays.clone();
+        let arrays = self.arrays_in_scope();
         self.condition_from(&locals, &globals, &arrays)
+    }
+
+    fn arrays_in_scope(&self) -> Vec<ArrayBinding> {
+        let mut arrays = self.arrays.clone();
+        arrays.extend(self.local_arrays.clone());
+        arrays
     }
 
     fn condition_from(
@@ -609,12 +640,13 @@ impl ProgramGenerator {
     }
 
     fn array_access(&mut self) -> Option<(String, usize)> {
-        if self.arrays.is_empty() {
+        let arrays = self.arrays_in_scope();
+        if arrays.is_empty() {
             return None;
         }
 
-        let array_index = self.rng.usize(self.arrays.len());
-        let array = &self.arrays[array_index];
+        let array_index = self.rng.usize(arrays.len());
+        let array = &arrays[array_index];
         let element_index = self.rng.usize(array.size);
         Some((array.name.clone(), element_index))
     }
@@ -733,11 +765,14 @@ mod tests {
     }
 
     #[test]
-    fn generated_program_contains_global_arrays() {
+    fn generated_program_contains_global_and_local_arrays() {
         let generated =
             ProgramGenerator::new(4321, DEFAULT_MAX_EXPR_DEPTH, DEFAULT_MAX_STATEMENTS).generate();
 
         assert!(generated.source.contains("int ga0["));
+        assert!(generated.source.contains("int la0["));
+        assert!(generated.source.contains("la0[0] = acc;"));
+        assert!(generated.source.contains("acc = (acc + la0[0]);"));
         assert!(
             audit_source(&generated.source).is_none(),
             "{}",

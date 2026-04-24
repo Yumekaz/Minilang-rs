@@ -81,6 +81,46 @@ pub fn first_trace_divergence(
     }
 }
 
+/// Return the first semantic trace mismatch, normalizing runtime-internal values.
+///
+/// VM and GC VM intentionally use different internal representations for heap
+/// references. This comparator keeps raw PC/opcode/control-flow checks, but
+/// normalizes stack values that are known to be array references.
+pub fn first_semantic_trace_divergence(
+    left: &[TraceEvent],
+    right: &[TraceEvent],
+) -> Option<TraceDivergence> {
+    let mut left_normalizer = TraceNormalizer::new();
+    let mut right_normalizer = TraceNormalizer::new();
+
+    for (index, (left_event, right_event)) in left.iter().zip(right).enumerate() {
+        let left_stack = left_normalizer.normalize_event(left_event);
+        let right_stack = right_normalizer.normalize_event(right_event);
+
+        if let Some(divergence) =
+            compare_event_semantic(index, left_event, right_event, &left_stack, &right_stack)
+        {
+            return Some(divergence);
+        }
+    }
+
+    match left.len().cmp(&right.len()) {
+        Ordering::Equal => None,
+        Ordering::Less => Some(TraceDivergence::new(
+            left.len(),
+            "length",
+            "<end>".to_string(),
+            summarize_event(&right[left.len()]),
+        )),
+        Ordering::Greater => Some(TraceDivergence::new(
+            right.len(),
+            "length",
+            summarize_event(&left[right.len()]),
+            "<end>".to_string(),
+        )),
+    }
+}
+
 /// Serialize trace events as a stable JSON object.
 pub fn events_to_json(backend: &str, events: &[TraceEvent]) -> String {
     let mut out = String::new();
@@ -100,6 +140,92 @@ pub fn events_to_json(backend: &str, events: &[TraceEvent]) -> String {
     out
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedStackEvent {
+    before: Vec<NormalizedValue>,
+    after: Vec<NormalizedValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NormalizedValue {
+    Int(i64),
+    ArrayRef(usize),
+}
+
+struct TraceNormalizer {
+    stack: Vec<NormalizedValue>,
+    next_array_ref: usize,
+}
+
+impl TraceNormalizer {
+    fn new() -> Self {
+        Self {
+            stack: Vec::new(),
+            next_array_ref: 0,
+        }
+    }
+
+    fn normalize_event(&mut self, event: &TraceEvent) -> NormalizedStackEvent {
+        let before = self.normalize_before(event);
+        let after = self.normalize_after(event, &before);
+        self.stack = after.clone();
+        NormalizedStackEvent { before, after }
+    }
+
+    fn normalize_before(&self, event: &TraceEvent) -> Vec<NormalizedValue> {
+        if self.stack.len() == event.stack_before.len() {
+            self.stack.clone()
+        } else {
+            event
+                .stack_before
+                .iter()
+                .copied()
+                .map(NormalizedValue::Int)
+                .collect()
+        }
+    }
+
+    fn normalize_after(
+        &mut self,
+        event: &TraceEvent,
+        before: &[NormalizedValue],
+    ) -> Vec<NormalizedValue> {
+        let mut after = preserve_stack_prefix(&event.stack_before, before, &event.stack_after);
+
+        if matches!(event.opcode.as_str(), "AllocArray" | "ArrayNew")
+            && event.stack_after.len() == event.stack_before.len() + 1
+        {
+            if let Some(last) = after.last_mut() {
+                *last = NormalizedValue::ArrayRef(self.next_array_ref);
+                self.next_array_ref += 1;
+            }
+        }
+
+        after
+    }
+}
+
+fn preserve_stack_prefix(
+    raw_before: &[i64],
+    normalized_before: &[NormalizedValue],
+    raw_after: &[i64],
+) -> Vec<NormalizedValue> {
+    raw_after
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if raw_before.get(index) == Some(value) {
+                normalized_before
+                    .get(index)
+                    .cloned()
+                    .unwrap_or(NormalizedValue::Int(*value))
+            } else {
+                NormalizedValue::Int(*value)
+            }
+        })
+        .collect()
+}
+
 fn compare_event(index: usize, left: &TraceEvent, right: &TraceEvent) -> Option<TraceDivergence> {
     field_divergence(index, "cycle", &left.cycle, &right.cycle)
         .or_else(|| field_divergence(index, "pc", &left.pc, &right.pc))
@@ -115,6 +241,47 @@ fn compare_event(index: usize, left: &TraceEvent, right: &TraceEvent) -> Option<
             )
         })
         .or_else(|| field_divergence(index, "stack_after", &left.stack_after, &right.stack_after))
+        .or_else(|| {
+            field_divergence(
+                index,
+                "frame_depth_before",
+                &left.frame_depth_before,
+                &right.frame_depth_before,
+            )
+        })
+        .or_else(|| {
+            field_divergence(
+                index,
+                "frame_depth_after",
+                &left.frame_depth_after,
+                &right.frame_depth_after,
+            )
+        })
+        .or_else(|| field_divergence(index, "next_pc", &left.next_pc, &right.next_pc))
+        .or_else(|| field_divergence(index, "outcome", &left.outcome, &right.outcome))
+}
+
+fn compare_event_semantic(
+    index: usize,
+    left: &TraceEvent,
+    right: &TraceEvent,
+    left_stack: &NormalizedStackEvent,
+    right_stack: &NormalizedStackEvent,
+) -> Option<TraceDivergence> {
+    field_divergence(index, "cycle", &left.cycle, &right.cycle)
+        .or_else(|| field_divergence(index, "pc", &left.pc, &right.pc))
+        .or_else(|| field_divergence(index, "opcode", &left.opcode, &right.opcode))
+        .or_else(|| field_divergence(index, "arg1", &left.arg1, &right.arg1))
+        .or_else(|| field_divergence(index, "arg2", &left.arg2, &right.arg2))
+        .or_else(|| {
+            field_divergence(
+                index,
+                "stack_before",
+                &left_stack.before,
+                &right_stack.before,
+            )
+        })
+        .or_else(|| field_divergence(index, "stack_after", &left_stack.after, &right_stack.after))
         .or_else(|| {
             field_divergence(
                 index,
@@ -285,5 +452,29 @@ mod tests {
 
         assert_eq!(divergence.event_index, 0);
         assert_eq!(divergence.field, "length");
+    }
+
+    #[test]
+    fn semantic_diff_normalizes_array_references() {
+        let left = TraceEvent {
+            cycle: 1,
+            pc: 0,
+            opcode: "AllocArray".to_string(),
+            arg1: 3,
+            arg2: 0,
+            stack_before: vec![],
+            stack_after: vec![1024],
+            frame_depth_before: 1,
+            frame_depth_after: 1,
+            next_pc: 1,
+            outcome: TraceOutcome::Continue,
+        };
+        let right = TraceEvent {
+            stack_after: vec![0],
+            ..left.clone()
+        };
+
+        assert!(first_trace_divergence(&[left.clone()], &[right.clone()]).is_some());
+        assert!(first_semantic_trace_divergence(&[left], &[right]).is_none());
     }
 }
