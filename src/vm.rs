@@ -77,6 +77,15 @@ pub struct Vm<'a> {
     trace: Option<Vec<TraceEvent>>,
 }
 
+struct TraceStep {
+    pc: usize,
+    opcode: Opcode,
+    arg1: i32,
+    arg2: i32,
+    stack_before: Option<Vec<i64>>,
+    frame_depth_before: usize,
+}
+
 /// VM limits matching Python spec
 impl<'a> Vm<'a> {
     pub const MAX_GLOBALS: usize = limits::MAX_GLOBAL_SLOTS;
@@ -205,15 +214,19 @@ impl<'a> Vm<'a> {
                 );
             }
 
-            let pc_before = self.pc;
-            let frame_depth_before = self.call_stack.len();
-            let trace_stack_before = self.trace.as_ref().map(|_| self.stack.clone());
-
             // Fetch instruction (bounds check eliminated in release)
             let instr = unsafe { self.program.instructions.get_unchecked(self.pc) };
-            let opcode = instr.opcode;
-            let arg1 = instr.arg1;
-            let arg2 = instr.arg2;
+            let trace_step = TraceStep {
+                pc: self.pc,
+                opcode: instr.opcode,
+                arg1: instr.arg1,
+                arg2: instr.arg2,
+                stack_before: self.trace.as_ref().map(|_| self.stack.clone()),
+                frame_depth_before: self.call_stack.len(),
+            };
+            let opcode = trace_step.opcode;
+            let arg1 = trace_step.arg1;
+            let arg2 = trace_step.arg2;
             self.cycles += 1;
 
             if self.debug {
@@ -242,12 +255,7 @@ impl<'a> Vm<'a> {
                 }
                 Err((trap_code, msg)) => {
                     self.record_trace(
-                        pc_before,
-                        opcode,
-                        arg1,
-                        arg2,
-                        trace_stack_before,
-                        frame_depth_before,
+                        trace_step,
                         TraceOutcome::Trap {
                             code: trap_code,
                             message: msg.clone(),
@@ -259,15 +267,7 @@ impl<'a> Vm<'a> {
 
             // Check for exit
             if self.call_stack.is_empty() {
-                self.record_trace(
-                    pc_before,
-                    opcode,
-                    arg1,
-                    arg2,
-                    trace_stack_before,
-                    frame_depth_before,
-                    TraceOutcome::Exit,
-                );
+                self.record_trace(trace_step, TraceOutcome::Exit);
 
                 let return_value = self.stack.pop().unwrap_or(0);
                 return VmResult {
@@ -283,41 +283,24 @@ impl<'a> Vm<'a> {
                 };
             }
 
-            self.record_trace(
-                pc_before,
-                opcode,
-                arg1,
-                arg2,
-                trace_stack_before,
-                frame_depth_before,
-                outcome,
-            );
+            self.record_trace(trace_step, outcome);
         }
     }
 
-    fn record_trace(
-        &mut self,
-        pc: usize,
-        opcode: Opcode,
-        arg1: i32,
-        arg2: i32,
-        stack_before: Option<Vec<i64>>,
-        frame_depth_before: usize,
-        outcome: TraceOutcome,
-    ) {
+    fn record_trace(&mut self, step: TraceStep, outcome: TraceOutcome) {
         let Some(events) = self.trace.as_mut() else {
             return;
         };
 
         events.push(TraceEvent {
             cycle: self.cycles,
-            pc,
-            opcode: format!("{:?}", opcode),
-            arg1,
-            arg2,
-            stack_before: stack_before.unwrap_or_default(),
+            pc: step.pc,
+            opcode: format!("{:?}", step.opcode),
+            arg1: step.arg1,
+            arg2: step.arg2,
+            stack_before: step.stack_before.unwrap_or_default(),
             stack_after: self.stack.clone(),
-            frame_depth_before,
+            frame_depth_before: step.frame_depth_before,
             frame_depth_after: self.call_stack.len(),
             next_pc: self.pc,
             outcome,
