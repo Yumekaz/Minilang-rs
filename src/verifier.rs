@@ -172,10 +172,14 @@ impl Verifier {
             .max()
             .unwrap_or(0);
         let max_frame_depth = self.max_frame_depth(program.main_func_id, &call_edges);
-        if max_frame_depth.is_none() {
-            push_trap(&mut possible_traps, TrapCode::StackOverflow);
-        } else if max_frame_depth.unwrap_or(0) > limits::MAX_FRAMES {
-            push_trap(&mut possible_traps, TrapCode::StackOverflow);
+        match max_frame_depth {
+            Some(depth) if depth > limits::MAX_FRAMES => {
+                push_trap(&mut possible_traps, TrapCode::StackOverflow);
+            }
+            None => {
+                push_trap(&mut possible_traps, TrapCode::StackOverflow);
+            }
+            Some(_) => {}
         }
 
         let valid = errors.is_empty();
@@ -341,7 +345,7 @@ impl Verifier {
         worklist.push_back(range.start);
 
         while let Some(pc) = worklist.pop_front() {
-            if pc < range.start || pc >= range.end {
+            if !pc_in_range(range, pc) {
                 errors.push(VerificationError::new(
                     Some(pc),
                     format!(
@@ -388,7 +392,7 @@ impl Verifier {
             }
 
             for successor in step.successors {
-                if successor < range.start || successor >= range.end {
+                if !pc_in_range(range, successor) {
                     errors.push(VerificationError::new(
                         Some(pc),
                         format!(
@@ -742,7 +746,7 @@ impl Verifier {
     ) -> Option<(usize, usize)> {
         let slot = self.global_slot(pc, raw_slot, errors)?;
         let size = self.array_size(pc, raw_size, errors)?;
-        let end = slot.checked_add(size).unwrap_or(usize::MAX);
+        let end = slot.saturating_add(size);
         if end > limits::MAX_GLOBAL_SLOTS {
             errors.push(VerificationError::new(
                 Some(pc),
@@ -774,7 +778,7 @@ impl Verifier {
         }
 
         let target = raw_target as usize;
-        if target < range.start || target >= range.end {
+        if !pc_in_range(range, target) {
             errors.push(VerificationError::new(
                 Some(pc),
                 format!(
@@ -985,6 +989,10 @@ fn push_trap(traps: &mut Vec<TrapCode>, trap: TrapCode) {
     if !traps.contains(&trap) {
         traps.push(trap);
     }
+}
+
+fn pc_in_range(range: &FunctionRange, pc: usize) -> bool {
+    (range.start..range.end).contains(&pc)
 }
 
 #[cfg(test)]
