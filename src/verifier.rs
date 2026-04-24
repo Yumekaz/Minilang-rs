@@ -113,6 +113,14 @@ struct Step {
     call_edges: Vec<(usize, usize)>,
 }
 
+struct StepContext<'a, 'b> {
+    program: &'a CompiledProgram,
+    range: &'a FunctionRange,
+    pc: usize,
+    errors: &'b mut Vec<VerificationError>,
+    possible_traps: &'b mut Vec<TrapCode>,
+}
+
 impl Verifier {
     pub fn new() -> Self {
         Self
@@ -361,15 +369,14 @@ impl Verifier {
             max_stack_depth = max_stack_depth.max(state.stack_depth);
 
             let instr = &program.instructions[pc];
-            let step = self.step_instruction(
+            let mut step_context = StepContext {
                 program,
                 range,
                 pc,
-                instr,
-                state,
-                &mut errors,
-                &mut possible_traps,
-            );
+                errors: &mut errors,
+                possible_traps: &mut possible_traps,
+            };
+            let step = self.step_instruction(&mut step_context, instr, state);
 
             let Some(step) = step else {
                 continue;
@@ -458,13 +465,9 @@ impl Verifier {
 
     fn step_instruction(
         &self,
-        program: &CompiledProgram,
-        range: &FunctionRange,
-        pc: usize,
+        cx: &mut StepContext<'_, '_>,
         instr: &Instruction,
         mut state: AbstractState,
-        errors: &mut Vec<VerificationError>,
-        possible_traps: &mut Vec<TrapCode>,
     ) -> Option<Step> {
         let mut successors = Vec::new();
         let mut call_edges = Vec::new();
@@ -475,24 +478,24 @@ impl Verifier {
                 state.stack_depth += 1;
             }
             Opcode::LoadLocal => {
-                let slot = self.local_slot(range, pc, instr.arg1, errors)?;
+                let slot = self.local_slot(cx.range, cx.pc, instr.arg1, cx.errors)?;
                 if !state.initialized_locals[slot] {
-                    push_trap(possible_traps, TrapCode::UndefinedLocal);
+                    push_trap(cx.possible_traps, TrapCode::UndefinedLocal);
                 }
                 state.stack_depth += 1;
             }
             Opcode::StoreLocal => {
-                self.pop_stack(pc, &mut state, 1, errors)?;
-                let slot = self.local_slot(range, pc, instr.arg1, errors)?;
+                self.pop_stack(cx.pc, &mut state, 1, cx.errors)?;
+                let slot = self.local_slot(cx.range, cx.pc, instr.arg1, cx.errors)?;
                 state.initialized_locals[slot] = true;
             }
             Opcode::LoadGlobal => {
-                self.global_slot(pc, instr.arg1, errors)?;
+                self.global_slot(cx.pc, instr.arg1, cx.errors)?;
                 state.stack_depth += 1;
             }
             Opcode::StoreGlobal => {
-                self.pop_stack(pc, &mut state, 1, errors)?;
-                self.global_slot(pc, instr.arg1, errors)?;
+                self.pop_stack(cx.pc, &mut state, 1, cx.errors)?;
+                self.global_slot(cx.pc, instr.arg1, cx.errors)?;
             }
             Opcode::Add
             | Opcode::Sub
@@ -505,46 +508,46 @@ impl Verifier {
             | Opcode::Ge
             | Opcode::And
             | Opcode::Or => {
-                self.pop_stack(pc, &mut state, 2, errors)?;
+                self.pop_stack(cx.pc, &mut state, 2, cx.errors)?;
                 state.stack_depth += 1;
             }
             Opcode::Div => {
-                self.pop_stack(pc, &mut state, 2, errors)?;
+                self.pop_stack(cx.pc, &mut state, 2, cx.errors)?;
                 state.stack_depth += 1;
-                push_trap(possible_traps, TrapCode::DivideByZero);
+                push_trap(cx.possible_traps, TrapCode::DivideByZero);
             }
             Opcode::Neg | Opcode::Not => {
-                self.pop_stack(pc, &mut state, 1, errors)?;
+                self.pop_stack(cx.pc, &mut state, 1, cx.errors)?;
                 state.stack_depth += 1;
             }
             Opcode::Jump => {
-                successors.push(self.jump_target(range, pc, instr.arg1, errors)?);
-                if (instr.arg1 as usize) <= pc {
-                    push_trap(possible_traps, TrapCode::CycleLimit);
+                successors.push(self.jump_target(cx.range, cx.pc, instr.arg1, cx.errors)?);
+                if (instr.arg1 as usize) <= cx.pc {
+                    push_trap(cx.possible_traps, TrapCode::CycleLimit);
                 }
                 terminal = true;
             }
             Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
-                self.pop_stack(pc, &mut state, 1, errors)?;
-                let target = self.jump_target(range, pc, instr.arg1, errors)?;
-                if target <= pc {
-                    push_trap(possible_traps, TrapCode::CycleLimit);
+                self.pop_stack(cx.pc, &mut state, 1, cx.errors)?;
+                let target = self.jump_target(cx.range, cx.pc, instr.arg1, cx.errors)?;
+                if target <= cx.pc {
+                    push_trap(cx.possible_traps, TrapCode::CycleLimit);
                 }
                 successors.push(target);
-                successors.push(pc + 1);
+                successors.push(cx.pc + 1);
                 terminal = true;
             }
             Opcode::Call => {
                 if instr.arg1 < 0 {
-                    errors.push(VerificationError::new(
-                        Some(pc),
+                    cx.errors.push(VerificationError::new(
+                        Some(cx.pc),
                         format!("negative function id {}", instr.arg1),
                     ));
                     return None;
                 }
                 if instr.arg2 < 0 {
-                    errors.push(VerificationError::new(
-                        Some(pc),
+                    cx.errors.push(VerificationError::new(
+                        Some(cx.pc),
                         format!("negative call argument count {}", instr.arg2),
                     ));
                     return None;
@@ -552,17 +555,17 @@ impl Verifier {
 
                 let callee_id = instr.arg1 as usize;
                 let argc = instr.arg2 as usize;
-                let Some(callee) = program.functions.get(&callee_id) else {
-                    errors.push(VerificationError::new(
-                        Some(pc),
+                let Some(callee) = cx.program.functions.get(&callee_id) else {
+                    cx.errors.push(VerificationError::new(
+                        Some(cx.pc),
                         format!("call to undefined function id {}", callee_id),
                     ));
                     return None;
                 };
 
                 if argc != callee.param_count {
-                    errors.push(VerificationError::new(
-                        Some(pc),
+                    cx.errors.push(VerificationError::new(
+                        Some(cx.pc),
                         format!(
                             "call to '{}' has {} args but expects {}",
                             callee.name, argc, callee.param_count
@@ -571,54 +574,57 @@ impl Verifier {
                     return None;
                 }
 
-                self.pop_stack(pc, &mut state, argc, errors)?;
+                self.pop_stack(cx.pc, &mut state, argc, cx.errors)?;
                 state.stack_depth += 1;
-                call_edges.push((range.id, callee_id));
+                call_edges.push((cx.range.id, callee_id));
             }
             Opcode::Return => {
-                self.pop_stack(pc, &mut state, 1, errors)?;
+                self.pop_stack(cx.pc, &mut state, 1, cx.errors)?;
                 terminal = true;
             }
             Opcode::ArrayLoad => {
-                self.global_array_range(pc, instr.arg1, instr.arg2, errors)?;
-                self.pop_stack(pc, &mut state, 1, errors)?;
+                self.global_array_range(cx.pc, instr.arg1, instr.arg2, cx.errors)?;
+                self.pop_stack(cx.pc, &mut state, 1, cx.errors)?;
                 state.stack_depth += 1;
-                push_trap(possible_traps, TrapCode::ArrayOutOfBounds);
+                push_trap(cx.possible_traps, TrapCode::ArrayOutOfBounds);
             }
             Opcode::ArrayStore => {
-                self.global_array_range(pc, instr.arg1, instr.arg2, errors)?;
-                self.pop_stack(pc, &mut state, 2, errors)?;
-                push_trap(possible_traps, TrapCode::ArrayOutOfBounds);
+                self.global_array_range(cx.pc, instr.arg1, instr.arg2, cx.errors)?;
+                self.pop_stack(cx.pc, &mut state, 2, cx.errors)?;
+                push_trap(cx.possible_traps, TrapCode::ArrayOutOfBounds);
             }
             Opcode::LocalArrayLoad => {
-                self.array_size(pc, instr.arg2, errors)?;
-                let slot = self.local_slot(range, pc, instr.arg1, errors)?;
+                self.array_size(cx.pc, instr.arg2, cx.errors)?;
+                let slot = self.local_slot(cx.range, cx.pc, instr.arg1, cx.errors)?;
                 if !state.initialized_locals[slot] {
-                    push_trap(possible_traps, TrapCode::UndefinedLocal);
+                    push_trap(cx.possible_traps, TrapCode::UndefinedLocal);
                 }
-                self.pop_stack(pc, &mut state, 1, errors)?;
+                self.pop_stack(cx.pc, &mut state, 1, cx.errors)?;
                 state.stack_depth += 1;
-                push_trap(possible_traps, TrapCode::ArrayOutOfBounds);
+                push_trap(cx.possible_traps, TrapCode::ArrayOutOfBounds);
             }
             Opcode::LocalArrayStore => {
-                self.array_size(pc, instr.arg2, errors)?;
-                let slot = self.local_slot(range, pc, instr.arg1, errors)?;
+                self.array_size(cx.pc, instr.arg2, cx.errors)?;
+                let slot = self.local_slot(cx.range, cx.pc, instr.arg1, cx.errors)?;
                 if !state.initialized_locals[slot] {
-                    push_trap(possible_traps, TrapCode::UndefinedLocal);
+                    push_trap(cx.possible_traps, TrapCode::UndefinedLocal);
                 }
-                self.pop_stack(pc, &mut state, 2, errors)?;
-                push_trap(possible_traps, TrapCode::ArrayOutOfBounds);
+                self.pop_stack(cx.pc, &mut state, 2, cx.errors)?;
+                push_trap(cx.possible_traps, TrapCode::ArrayOutOfBounds);
             }
             Opcode::ArrayNew | Opcode::AllocArray => {
-                self.array_size(pc, instr.arg1, errors)?;
+                self.array_size(cx.pc, instr.arg1, cx.errors)?;
                 state.stack_depth += 1;
             }
             Opcode::Print | Opcode::Pop => {
-                self.pop_stack(pc, &mut state, 1, errors)?;
+                self.pop_stack(cx.pc, &mut state, 1, cx.errors)?;
             }
             Opcode::Dup => {
                 if state.stack_depth == 0 {
-                    errors.push(VerificationError::new(Some(pc), "stack underflow on dup"));
+                    cx.errors.push(VerificationError::new(
+                        Some(cx.pc),
+                        "stack underflow on dup",
+                    ));
                     return None;
                 }
                 state.stack_depth += 1;
@@ -629,7 +635,7 @@ impl Verifier {
         }
 
         if !terminal {
-            successors.push(pc + 1);
+            successors.push(cx.pc + 1);
         }
 
         Some(Step {
