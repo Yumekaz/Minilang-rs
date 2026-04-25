@@ -6,8 +6,11 @@
 //! problem, it is likely a runtime/compiler bug rather than random invalid
 //! input.
 
+use crate::ast::{BinaryOp, Expr, Function, GlobalVar, Param, Program, Stmt, Type, UnaryOp};
 use crate::compiler::disassemble;
 use crate::gc_vm::GcVm;
+use crate::lexer::Lexer;
+use crate::parser::Parser;
 use crate::vm::Vm;
 use crate::{
     compare_backends, compile, diff_vm_gc_traces, replay_vm_trace, CompiledProgram, Verifier,
@@ -30,7 +33,16 @@ pub struct FuzzConfig {
     pub max_expr_depth: usize,
     pub max_statements: usize,
     pub artifact_dir: Option<PathBuf>,
+    pub corpus_dir: Option<PathBuf>,
     pub shrink: bool,
+    pub mode: FuzzMode,
+}
+
+/// Program family used by the deterministic generator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuzzMode {
+    General,
+    OptimizerStress,
 }
 
 /// Full fuzzer run result.
@@ -48,6 +60,7 @@ pub struct FuzzReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FuzzCoverage {
     pub cases: usize,
+    pub optimizer_stress_cases: usize,
     pub helper_functions: usize,
     pub helper_calls: usize,
     pub branches: usize,
@@ -57,6 +70,10 @@ pub struct FuzzCoverage {
     pub global_array_writes: usize,
     pub local_array_reads: usize,
     pub local_array_writes: usize,
+    pub loop_indexed_array_writes: usize,
+    pub helper_array_interactions: usize,
+    pub constant_fold_patterns: usize,
+    pub dead_code_shapes: usize,
 }
 
 /// First failing generated program, with minimized repro when shrinking is on.
@@ -112,6 +129,7 @@ struct ArrayAccess {
 struct FeatureSet {
     helper_functions: bool,
     helper_calls: bool,
+    optimizer_stress: bool,
     branches: bool,
     loops: bool,
     prints: bool,
@@ -119,6 +137,10 @@ struct FeatureSet {
     global_array_writes: bool,
     local_array_reads: bool,
     local_array_writes: bool,
+    loop_indexed_array_writes: bool,
+    helper_array_interactions: bool,
+    constant_fold_patterns: bool,
+    dead_code_shapes: bool,
 }
 
 struct GeneratedProgram {
@@ -163,9 +185,13 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
 
     for case_index in 0..config.cases {
         let case_seed = rng.next_u64();
-        let generated =
-            ProgramGenerator::new(case_seed, config.max_expr_depth, config.max_statements)
-                .generate();
+        let generated = match config.mode {
+            FuzzMode::General => {
+                ProgramGenerator::new(case_seed, config.max_expr_depth, config.max_statements)
+                    .generate()
+            }
+            FuzzMode::OptimizerStress => OptimizerStressGenerator::new(case_seed).generate(),
+        };
         coverage.observe(&generated.features);
 
         if let Some(reason) = audit_source(&generated.source) {
@@ -192,6 +218,19 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
                     Err(err) => (None, Some(err.to_string())),
                 },
                 None => (None, None),
+            };
+            let artifact_error = match (&config.corpus_dir, artifact_error) {
+                (Some(corpus_dir), None) => write_corpus_repro(
+                    corpus_dir,
+                    config.seed,
+                    case_index,
+                    case_seed,
+                    reason.tag(),
+                    &minimized_source,
+                )
+                .err()
+                .map(|err| err.to_string()),
+                (_, artifact_error) => artifact_error,
             };
 
             return FuzzReport {
@@ -232,7 +271,9 @@ impl Default for FuzzConfig {
             max_expr_depth: DEFAULT_MAX_EXPR_DEPTH,
             max_statements: DEFAULT_MAX_STATEMENTS,
             artifact_dir: Some(PathBuf::from(DEFAULT_ARTIFACT_DIR)),
+            corpus_dir: None,
             shrink: true,
+            mode: FuzzMode::General,
         }
     }
 }
@@ -252,6 +293,7 @@ impl FuzzFailureReason {
 impl FuzzCoverage {
     fn observe(&mut self, features: &FeatureSet) {
         self.cases += 1;
+        self.optimizer_stress_cases += usize::from(features.optimizer_stress);
         self.helper_functions += usize::from(features.helper_functions);
         self.helper_calls += usize::from(features.helper_calls);
         self.branches += usize::from(features.branches);
@@ -261,6 +303,10 @@ impl FuzzCoverage {
         self.global_array_writes += usize::from(features.global_array_writes);
         self.local_array_reads += usize::from(features.local_array_reads);
         self.local_array_writes += usize::from(features.local_array_writes);
+        self.loop_indexed_array_writes += usize::from(features.loop_indexed_array_writes);
+        self.helper_array_interactions += usize::from(features.helper_array_interactions);
+        self.constant_fold_patterns += usize::from(features.constant_fold_patterns);
+        self.dead_code_shapes += usize::from(features.dead_code_shapes);
     }
 }
 
@@ -313,13 +359,336 @@ fn shrink_source(source: &str, reason_tag: &str) -> String {
     let mut current = source.to_string();
 
     for _ in 0..SHRINK_PASSES {
-        let Some(candidate) = find_line_removal_shrink(&current, reason_tag) else {
+        let Some(candidate) = find_ast_shrink(&current, reason_tag)
+            .or_else(|| find_line_removal_shrink(&current, reason_tag))
+        else {
             break;
         };
         current = candidate;
     }
 
     current
+}
+
+fn find_ast_shrink(source: &str, reason_tag: &str) -> Option<String> {
+    let program = parse_program(source)?;
+    for candidate in ast_shrink_candidates(&program) {
+        let candidate_source = emit_program(&candidate);
+        if candidate_source != source && has_same_failure(&candidate_source, reason_tag) {
+            return Some(candidate_source);
+        }
+    }
+    None
+}
+
+fn parse_program(source: &str) -> Option<Program> {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize();
+    let mut parser = Parser::new(tokens);
+    parser.parse().ok()
+}
+
+fn ast_shrink_candidates(program: &Program) -> Vec<Program> {
+    let mut candidates = Vec::new();
+
+    for index in 0..program.globals.len() {
+        let mut candidate = program.clone();
+        candidate.globals.remove(index);
+        candidates.push(candidate);
+    }
+
+    for index in 0..program.functions.len() {
+        if program.functions[index].name == "main" {
+            continue;
+        }
+        let mut candidate = program.clone();
+        candidate.functions.remove(index);
+        candidates.push(candidate);
+    }
+
+    for (function_index, function) in program.functions.iter().enumerate() {
+        for body in body_shrink_candidates(&function.body) {
+            let mut candidate = program.clone();
+            candidate.functions[function_index].body = body;
+            candidates.push(candidate);
+        }
+    }
+
+    candidates
+}
+
+fn body_shrink_candidates(body: &[Stmt]) -> Vec<Vec<Stmt>> {
+    let mut candidates = Vec::new();
+
+    for index in 0..body.len() {
+        if !matches!(body[index], Stmt::Return { .. }) {
+            let mut candidate = body.to_vec();
+            candidate.remove(index);
+            candidates.push(candidate);
+        }
+
+        for replacement in stmt_shrink_candidates(&body[index]) {
+            let mut candidate = body.to_vec();
+            candidate.splice(index..=index, replacement);
+            candidates.push(candidate);
+        }
+    }
+
+    candidates
+}
+
+fn stmt_shrink_candidates(stmt: &Stmt) -> Vec<Vec<Stmt>> {
+    match stmt {
+        Stmt::VarDecl {
+            var_type,
+            name,
+            init_expr,
+            array_size,
+            span,
+        } => init_expr
+            .as_ref()
+            .map(|expr| {
+                expr_shrink_candidates(expr)
+                    .into_iter()
+                    .map(|candidate_expr| {
+                        vec![Stmt::VarDecl {
+                            var_type: *var_type,
+                            name: name.clone(),
+                            init_expr: Some(candidate_expr),
+                            array_size: *array_size,
+                            span: *span,
+                        }]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        Stmt::Assign {
+            target,
+            index_expr,
+            value,
+            span,
+        } => {
+            let mut candidates = Vec::new();
+            for candidate_value in expr_shrink_candidates(value) {
+                candidates.push(vec![Stmt::Assign {
+                    target: target.clone(),
+                    index_expr: index_expr.clone(),
+                    value: candidate_value,
+                    span: *span,
+                }]);
+            }
+            if let Some(index_expr) = index_expr {
+                candidates.push(vec![Stmt::Assign {
+                    target: target.clone(),
+                    index_expr: Some(Expr::IntLiteral {
+                        value: 0,
+                        span: *span,
+                    }),
+                    value: value.clone(),
+                    span: *span,
+                }]);
+                for candidate_index in expr_shrink_candidates(index_expr) {
+                    candidates.push(vec![Stmt::Assign {
+                        target: target.clone(),
+                        index_expr: Some(candidate_index),
+                        value: value.clone(),
+                        span: *span,
+                    }]);
+                }
+            }
+            candidates
+        }
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+            span,
+        } => {
+            let mut candidates = vec![then_body.clone()];
+            if let Some(else_body) = else_body {
+                candidates.push(else_body.clone());
+            }
+            for candidate_condition in expr_shrink_candidates(condition) {
+                candidates.push(vec![Stmt::If {
+                    condition: candidate_condition,
+                    then_body: then_body.clone(),
+                    else_body: else_body.clone(),
+                    span: *span,
+                }]);
+            }
+            for candidate_body in body_shrink_candidates(then_body) {
+                candidates.push(vec![Stmt::If {
+                    condition: condition.clone(),
+                    then_body: candidate_body,
+                    else_body: else_body.clone(),
+                    span: *span,
+                }]);
+            }
+            if let Some(else_body) = else_body {
+                for candidate_else in body_shrink_candidates(else_body) {
+                    candidates.push(vec![Stmt::If {
+                        condition: condition.clone(),
+                        then_body: then_body.clone(),
+                        else_body: Some(candidate_else),
+                        span: *span,
+                    }]);
+                }
+            }
+            candidates
+        }
+        Stmt::While {
+            condition,
+            body,
+            span,
+        } => {
+            let mut candidates = vec![body.clone()];
+            for candidate_condition in expr_shrink_candidates(condition) {
+                candidates.push(vec![Stmt::While {
+                    condition: candidate_condition,
+                    body: body.clone(),
+                    span: *span,
+                }]);
+            }
+            for candidate_body in body_shrink_candidates(body) {
+                candidates.push(vec![Stmt::While {
+                    condition: condition.clone(),
+                    body: candidate_body,
+                    span: *span,
+                }]);
+            }
+            candidates
+        }
+        Stmt::Return { value, span } => expr_shrink_candidates(value)
+            .into_iter()
+            .map(|candidate_value| {
+                vec![Stmt::Return {
+                    value: candidate_value,
+                    span: *span,
+                }]
+            })
+            .collect(),
+        Stmt::Print { value, span } => expr_shrink_candidates(value)
+            .into_iter()
+            .map(|candidate_value| {
+                vec![Stmt::Print {
+                    value: candidate_value,
+                    span: *span,
+                }]
+            })
+            .collect(),
+        Stmt::ExprStmt { expr, span } => expr_shrink_candidates(expr)
+            .into_iter()
+            .map(|candidate_expr| {
+                vec![Stmt::ExprStmt {
+                    expr: candidate_expr,
+                    span: *span,
+                }]
+            })
+            .collect(),
+    }
+}
+
+fn expr_shrink_candidates(expr: &Expr) -> Vec<Expr> {
+    let span = expr.span();
+    let zero = Expr::IntLiteral { value: 0, span };
+    match expr {
+        Expr::IntLiteral { value, .. } => {
+            if *value == 0 {
+                Vec::new()
+            } else {
+                vec![zero]
+            }
+        }
+        Expr::BoolLiteral { value, .. } => {
+            if *value {
+                vec![Expr::BoolLiteral { value: false, span }]
+            } else {
+                Vec::new()
+            }
+        }
+        Expr::Identifier { .. } => vec![zero],
+        Expr::Binary {
+            op,
+            left,
+            right,
+            span,
+        } => {
+            let mut candidates = vec![
+                *left.clone(),
+                *right.clone(),
+                Expr::IntLiteral {
+                    value: 0,
+                    span: *span,
+                },
+            ];
+            for candidate_left in expr_shrink_candidates(left) {
+                candidates.push(Expr::Binary {
+                    op: *op,
+                    left: Box::new(candidate_left),
+                    right: right.clone(),
+                    span: *span,
+                });
+            }
+            for candidate_right in expr_shrink_candidates(right) {
+                candidates.push(Expr::Binary {
+                    op: *op,
+                    left: left.clone(),
+                    right: Box::new(candidate_right),
+                    span: *span,
+                });
+            }
+            candidates
+        }
+        Expr::Unary { op, operand, span } => {
+            let mut candidates = vec![*operand.clone()];
+            for candidate_operand in expr_shrink_candidates(operand) {
+                candidates.push(Expr::Unary {
+                    op: *op,
+                    operand: Box::new(candidate_operand),
+                    span: *span,
+                });
+            }
+            candidates
+        }
+        Expr::Call { name, args, span } => {
+            let mut candidates = vec![zero];
+            for index in 0..args.len() {
+                for candidate_arg in expr_shrink_candidates(&args[index]) {
+                    let mut candidate_args = args.clone();
+                    candidate_args[index] = candidate_arg;
+                    candidates.push(Expr::Call {
+                        name: name.clone(),
+                        args: candidate_args,
+                        span: *span,
+                    });
+                }
+            }
+            candidates
+        }
+        Expr::ArrayIndex {
+            array_name,
+            index,
+            span,
+        } => {
+            let mut candidates = vec![zero];
+            candidates.push(Expr::ArrayIndex {
+                array_name: array_name.clone(),
+                index: Box::new(Expr::IntLiteral {
+                    value: 0,
+                    span: *span,
+                }),
+                span: *span,
+            });
+            for candidate_index in expr_shrink_candidates(index) {
+                candidates.push(Expr::ArrayIndex {
+                    array_name: array_name.clone(),
+                    index: Box::new(candidate_index),
+                    span: *span,
+                });
+            }
+            candidates
+        }
+    }
 }
 
 fn find_line_removal_shrink(source: &str, reason_tag: &str) -> Option<String> {
@@ -357,6 +726,215 @@ fn has_same_failure(source: &str, reason_tag: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn emit_program(program: &Program) -> String {
+    let mut out = String::new();
+    for global in &program.globals {
+        emit_global(&mut out, global);
+    }
+    if !program.globals.is_empty() && !program.functions.is_empty() {
+        out.push('\n');
+    }
+    for (index, function) in program.functions.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        emit_function(&mut out, function);
+    }
+    out
+}
+
+fn emit_global(out: &mut String, global: &GlobalVar) {
+    out.push_str(type_name(global.var_type));
+    out.push(' ');
+    out.push_str(&global.name);
+    if let Some(size) = global.array_size {
+        write!(out, "[{}]", size).expect("write to string cannot fail");
+    } else if let Some(init_expr) = &global.init_expr {
+        out.push_str(" = ");
+        out.push_str(&emit_expr(init_expr));
+    }
+    out.push_str(";\n");
+}
+
+fn emit_function(out: &mut String, function: &Function) {
+    out.push_str("func ");
+    out.push_str(&function.name);
+    out.push('(');
+    for (index, param) in function.params.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        emit_param(out, param);
+    }
+    out.push_str(") {\n");
+    for stmt in &function.body {
+        emit_stmt(out, stmt, 1);
+    }
+    out.push_str("}\n");
+}
+
+fn emit_param(out: &mut String, param: &Param) {
+    out.push_str(type_name(param.param_type));
+    out.push(' ');
+    out.push_str(&param.name);
+}
+
+fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
+    push_indent(out, indent);
+    match stmt {
+        Stmt::VarDecl {
+            var_type,
+            name,
+            init_expr,
+            array_size,
+            ..
+        } => {
+            out.push_str(type_name(*var_type));
+            out.push(' ');
+            out.push_str(name);
+            if let Some(size) = array_size {
+                write!(out, "[{}]", size).expect("write to string cannot fail");
+            } else if let Some(init_expr) = init_expr {
+                out.push_str(" = ");
+                out.push_str(&emit_expr(init_expr));
+            }
+            out.push_str(";\n");
+        }
+        Stmt::Assign {
+            target,
+            index_expr,
+            value,
+            ..
+        } => {
+            out.push_str(target);
+            if let Some(index_expr) = index_expr {
+                out.push('[');
+                out.push_str(&emit_expr(index_expr));
+                out.push(']');
+            }
+            out.push_str(" = ");
+            out.push_str(&emit_expr(value));
+            out.push_str(";\n");
+        }
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+            ..
+        } => {
+            out.push_str("if (");
+            out.push_str(&emit_expr(condition));
+            out.push_str(") {\n");
+            for stmt in then_body {
+                emit_stmt(out, stmt, indent + 1);
+            }
+            push_indent(out, indent);
+            out.push('}');
+            if let Some(else_body) = else_body {
+                out.push_str(" else {\n");
+                for stmt in else_body {
+                    emit_stmt(out, stmt, indent + 1);
+                }
+                push_indent(out, indent);
+                out.push('}');
+            }
+            out.push('\n');
+        }
+        Stmt::While {
+            condition, body, ..
+        } => {
+            out.push_str("while (");
+            out.push_str(&emit_expr(condition));
+            out.push_str(") {\n");
+            for stmt in body {
+                emit_stmt(out, stmt, indent + 1);
+            }
+            push_indent(out, indent);
+            out.push_str("}\n");
+        }
+        Stmt::Return { value, .. } => {
+            out.push_str("return ");
+            out.push_str(&emit_expr(value));
+            out.push_str(";\n");
+        }
+        Stmt::Print { value, .. } => {
+            out.push_str("print ");
+            out.push_str(&emit_expr(value));
+            out.push_str(";\n");
+        }
+        Stmt::ExprStmt { expr, .. } => {
+            out.push_str(&emit_expr(expr));
+            out.push_str(";\n");
+        }
+    }
+}
+
+fn push_indent(out: &mut String, indent: usize) {
+    for _ in 0..indent {
+        out.push_str("  ");
+    }
+}
+
+fn emit_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::IntLiteral { value, .. } => value.to_string(),
+        Expr::BoolLiteral { value, .. } => value.to_string(),
+        Expr::Identifier { name, .. } => name.clone(),
+        Expr::Binary {
+            op, left, right, ..
+        } => format!(
+            "({} {} {})",
+            emit_expr(left),
+            binary_op_symbol(*op),
+            emit_expr(right)
+        ),
+        Expr::Unary { op, operand, .. } => {
+            format!("({}{})", unary_op_symbol(*op), emit_expr(operand))
+        }
+        Expr::Call { name, args, .. } => {
+            let args = args.iter().map(emit_expr).collect::<Vec<_>>().join(", ");
+            format!("{}({})", name, args)
+        }
+        Expr::ArrayIndex {
+            array_name, index, ..
+        } => {
+            format!("{}[{}]", array_name, emit_expr(index))
+        }
+    }
+}
+
+fn type_name(ty: Type) -> &'static str {
+    match ty {
+        Type::Int => "int",
+        Type::Bool => "bool",
+        Type::Void | Type::Error => "int",
+    }
+}
+
+fn binary_op_symbol(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Eq => "==",
+        BinaryOp::Ne => "!=",
+        BinaryOp::Lt => "<",
+        BinaryOp::Gt => ">",
+        BinaryOp::Le => "<=",
+        BinaryOp::Ge => ">=",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+    }
+}
+
+fn unary_op_symbol(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::Neg => "-",
+        UnaryOp::Not => "!",
+    }
+}
+
 fn write_failure_artifacts(input: FailureArtifactInput<'_>) -> io::Result<PathBuf> {
     let case_dir = input.base_dir.join(format!(
         "seed_{:016x}_case_{:04}_case_seed_{:016x}",
@@ -375,6 +953,24 @@ fn write_failure_artifacts(input: FailureArtifactInput<'_>) -> io::Result<PathBu
     }
 
     Ok(case_dir)
+}
+
+fn write_corpus_repro(
+    corpus_dir: &Path,
+    run_seed: u64,
+    case_index: usize,
+    case_seed: u64,
+    reason_tag: &str,
+    minimized_source: &str,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(corpus_dir)?;
+    let file_name = format!(
+        "{}_seed_{:016x}_case_{:04}_case_seed_{:016x}.lang",
+        reason_tag, run_seed, case_index, case_seed
+    );
+    let path = corpus_dir.join(file_name);
+    fs::write(path.as_path(), minimized_source)?;
+    Ok(path)
 }
 
 fn failure_manifest(input: &FailureArtifactInput<'_>) -> String {
@@ -461,17 +1057,13 @@ impl ProgramGenerator {
             source.push_str(&format!("int {}[{}];\n", name, size));
         }
 
-        if count > 0 || array_count > 0 {
-            source.push('\n');
-        }
+        source.push('\n');
     }
 
     fn generate_helpers(&mut self, source: &mut String) {
-        let count = self.rng.usize(3);
-        if count > 0 {
-            self.features.helper_functions = true;
-            self.features.branches = true;
-        }
+        let count = 1 + self.rng.usize(2);
+        self.features.helper_functions = true;
+        self.features.branches = true;
         for index in 0..count {
             let arity = 1 + self.rng.usize(2);
             let name = format!("f{}", index);
@@ -519,6 +1111,7 @@ impl ProgramGenerator {
         self.locals.push("acc".to_string());
         self.generate_local_arrays(source);
         self.generate_local_array_smoke(source);
+        self.generate_helper_array_smoke(source);
 
         let statement_count = if self.max_statements <= 4 {
             self.max_statements
@@ -557,6 +1150,33 @@ impl ProgramGenerator {
             source.push_str(&format!("  {}[0] = acc;\n", name));
             source.push_str(&format!("  acc = (acc + {}[0]);\n", name));
         }
+    }
+
+    fn generate_helper_array_smoke(&mut self, source: &mut String) {
+        let (Some(array), Some(helper)) = (self.local_arrays.first(), self.helpers.first()) else {
+            return;
+        };
+        let array_name = array.name.clone();
+        let scope = array.scope;
+        let helper = helper.clone();
+        let args = (0..helper.arity)
+            .map(|index| {
+                if index == 0 {
+                    self.features.record_array_read(scope);
+                    format!("{}[0]", array_name)
+                } else {
+                    "acc".to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.features.helper_calls = true;
+        self.features.helper_array_interactions = true;
+        self.features.record_array_write(scope);
+        source.push_str(&format!(
+            "  {}[0] = {}({});\n",
+            array_name, helper.name, args
+        ));
     }
 
     fn generate_main_statement(&mut self, source: &mut String) {
@@ -606,13 +1226,31 @@ impl ProgramGenerator {
     fn generate_bounded_loop(&mut self, source: &mut String) {
         self.features.loops = true;
         let index_name = self.fresh_local();
-        let limit = 1 + self.rng.usize(5);
+        let loop_array = self.pick_loop_array();
+        let limit = loop_array
+            .as_ref()
+            .map(|array| 1 + self.rng.usize(array.size.min(5)))
+            .unwrap_or_else(|| 1 + self.rng.usize(5));
         source.push_str(&format!("  int {} = 0;\n", index_name));
         self.locals.push(index_name.clone());
 
         let expr = self.int_expr();
         source.push_str(&format!("  while ({} < {}) {{\n", index_name, limit));
-        source.push_str(&format!("    acc = (acc + {});\n", expr));
+        if let Some(array) = loop_array {
+            self.features.record_array_write(array.scope);
+            self.features.record_array_read(array.scope);
+            self.features.loop_indexed_array_writes = true;
+            source.push_str(&format!(
+                "    {}[{}] = ({} + {});\n",
+                array.name, index_name, expr, index_name
+            ));
+            source.push_str(&format!(
+                "    acc = (acc + {}[{}]);\n",
+                array.name, index_name
+            ));
+        } else {
+            source.push_str(&format!("    acc = (acc + {});\n", expr));
+        }
         source.push_str(&format!("    {} = ({} + 1);\n", index_name, index_name));
         source.push_str("  }\n");
     }
@@ -797,6 +1435,15 @@ impl ProgramGenerator {
         })
     }
 
+    fn pick_loop_array(&mut self) -> Option<ArrayBinding> {
+        let arrays = self.arrays_in_scope();
+        if arrays.is_empty() || !self.rng.chance(3, 4) {
+            return None;
+        }
+        let index = self.rng.usize(arrays.len());
+        Some(arrays[index].clone())
+    }
+
     fn small_literal(&mut self) -> i32 {
         self.rng.i32_between(-16, 16)
     }
@@ -808,6 +1455,60 @@ impl ProgramGenerator {
         } else {
             -value
         }
+    }
+}
+
+struct OptimizerStressGenerator {
+    rng: Rng,
+}
+
+impl OptimizerStressGenerator {
+    fn new(seed: u64) -> Self {
+        Self {
+            rng: Rng::new(seed),
+        }
+    }
+
+    fn generate(mut self) -> GeneratedProgram {
+        let features = FeatureSet {
+            optimizer_stress: true,
+            branches: true,
+            loops: true,
+            prints: true,
+            constant_fold_patterns: true,
+            dead_code_shapes: true,
+            ..FeatureSet::default()
+        };
+
+        let a = 1 + self.rng.usize(9) as i32;
+        let b = 1 + self.rng.usize(9) as i32;
+        let c = 1 + self.rng.usize(5) as i32;
+        let loop_limit = 2 + self.rng.usize(4);
+        let dead_value = 100 + self.rng.usize(900) as i32;
+        let branch_bias = self.rng.usize(3) as i32;
+
+        let source = format!(
+            "func main() {{\n\
+             \x20\x20int acc = (({a} + {b}) * ({c} + 1));\n\
+             \x20\x20acc = (acc * 1);\n\
+             \x20\x20acc = (acc + 0);\n\
+             \x20\x20int i = 0;\n\
+             \x20\x20while (i < {loop_limit}) {{\n\
+             \x20\x20\x20\x20acc = (acc + ((i * 1) + 0));\n\
+             \x20\x20\x20\x20i = (i + 1);\n\
+             \x20\x20}}\n\
+             \x20\x20if ((({a} + {branch_bias}) >= {a}) && (acc != {dead_value})) {{\n\
+             \x20\x20\x20\x20acc = (acc + (2 * 1));\n\
+             \x20\x20}} else {{\n\
+             \x20\x20\x20\x20acc = (acc + {dead_value});\n\
+             \x20\x20}}\n\
+             \x20\x20print (acc + 0);\n\
+             \x20\x20return acc;\n\
+             \x20\x20acc = (acc + {dead_value});\n\
+             }}\n"
+        );
+
+        GeneratedProgram { source, features }
     }
 }
 
@@ -909,6 +1610,11 @@ impl fmt::Display for FuzzCoverage {
         writeln!(f, "  cases: {}", self.cases)?;
         writeln!(
             f,
+            "  optimizer stress cases: {}",
+            self.optimizer_stress_cases
+        )?;
+        writeln!(
+            f,
             "  cases with helper functions: {}",
             self.helper_functions
         )?;
@@ -935,6 +1641,26 @@ impl fmt::Display for FuzzCoverage {
             f,
             "  cases with local array writes: {}",
             self.local_array_writes
+        )?;
+        writeln!(
+            f,
+            "  cases with loop-indexed array writes: {}",
+            self.loop_indexed_array_writes
+        )?;
+        writeln!(
+            f,
+            "  cases with helper/array interactions: {}",
+            self.helper_array_interactions
+        )?;
+        writeln!(
+            f,
+            "  cases with constant-fold patterns: {}",
+            self.constant_fold_patterns
+        )?;
+        writeln!(
+            f,
+            "  cases with dead-code shapes: {}",
+            self.dead_code_shapes
         )
     }
 }
@@ -956,6 +1682,12 @@ impl fmt::Display for FuzzFailureReason {
 fn push_coverage_json(out: &mut String, coverage: &FuzzCoverage) {
     out.push('{');
     write!(out, "\"cases\":{}", coverage.cases).expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"optimizer_stress_cases\":{}",
+        coverage.optimizer_stress_cases
+    )
+    .expect("write to string cannot fail");
     write!(out, ",\"helper_functions\":{}", coverage.helper_functions)
         .expect("write to string cannot fail");
     write!(out, ",\"helper_calls\":{}", coverage.helper_calls)
@@ -983,6 +1715,26 @@ fn push_coverage_json(out: &mut String, coverage: &FuzzCoverage) {
         coverage.local_array_writes
     )
     .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"loop_indexed_array_writes\":{}",
+        coverage.loop_indexed_array_writes
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"helper_array_interactions\":{}",
+        coverage.helper_array_interactions
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"constant_fold_patterns\":{}",
+        coverage.constant_fold_patterns
+    )
+    .expect("write to string cannot fail");
+    write!(out, ",\"dead_code_shapes\":{}", coverage.dead_code_shapes)
+        .expect("write to string cannot fail");
     out.push('}');
 }
 
@@ -1055,6 +1807,9 @@ fn format_feature_set(features: &FeatureSet) -> String {
     if features.helper_calls {
         names.push("helper-calls");
     }
+    if features.optimizer_stress {
+        names.push("optimizer-stress");
+    }
     if features.branches {
         names.push("branches");
     }
@@ -1075,6 +1830,18 @@ fn format_feature_set(features: &FeatureSet) -> String {
     }
     if features.local_array_writes {
         names.push("local-array-writes");
+    }
+    if features.loop_indexed_array_writes {
+        names.push("loop-indexed-array-writes");
+    }
+    if features.helper_array_interactions {
+        names.push("helper-array-interactions");
+    }
+    if features.constant_fold_patterns {
+        names.push("constant-fold-patterns");
+    }
+    if features.dead_code_shapes {
+        names.push("dead-code-shapes");
     }
 
     if names.is_empty() {
@@ -1103,6 +1870,8 @@ mod tests {
         assert_eq!(report.coverage.cases, 12);
         assert_eq!(report.coverage.local_array_reads, 12);
         assert_eq!(report.coverage.local_array_writes, 12);
+        assert_eq!(report.coverage.helper_functions, 12);
+        assert!(report.coverage.helper_array_interactions > 0);
         assert!(report.to_json().contains("\"success\":true"));
         assert!(report.to_json().contains("\"coverage\""));
     }
@@ -1116,8 +1885,10 @@ mod tests {
         assert!(generated.source.contains("int la0["));
         assert!(generated.source.contains("la0[0] = acc;"));
         assert!(generated.source.contains("acc = (acc + la0[0]);"));
+        assert!(generated.source.contains("func f0("));
         assert!(generated.features.local_array_reads);
         assert!(generated.features.local_array_writes);
+        assert!(generated.features.helper_array_interactions);
         assert!(
             audit_source(&generated.source).is_none(),
             "{}",
@@ -1126,7 +1897,82 @@ mod tests {
     }
 
     #[test]
-    fn line_shrinker_preserves_matching_failure_kind() {
+    fn generated_programs_cover_loop_indexed_arrays() {
+        let mut found = false;
+        for seed in 0..128 {
+            let generated =
+                ProgramGenerator::new(seed, DEFAULT_MAX_EXPR_DEPTH, DEFAULT_MAX_STATEMENTS)
+                    .generate();
+            if generated.features.loop_indexed_array_writes {
+                assert!(generated.source.contains("while"));
+                assert!(
+                    audit_source(&generated.source).is_none(),
+                    "{}",
+                    generated.source
+                );
+                found = true;
+                break;
+            }
+        }
+
+        assert!(
+            found,
+            "expected at least one deterministic seed to cover loop-indexed arrays"
+        );
+    }
+
+    #[test]
+    fn optimizer_stress_mode_passes_audit_pipeline() {
+        let report = run_fuzzer(FuzzConfig {
+            seed: 0x0f7,
+            cases: 8,
+            artifact_dir: None,
+            mode: FuzzMode::OptimizerStress,
+            ..FuzzConfig::default()
+        });
+
+        assert!(report.success, "{report:#?}");
+        assert_eq!(report.coverage.optimizer_stress_cases, 8);
+        assert_eq!(report.coverage.constant_fold_patterns, 8);
+        assert_eq!(report.coverage.dead_code_shapes, 8);
+        assert!(report.to_json().contains("\"optimizer_stress_cases\":8"));
+    }
+
+    #[test]
+    fn ast_shrinker_generates_function_statement_and_expression_reductions() {
+        let source = concat!(
+            "func unused() {\n",
+            "  return 1;\n",
+            "}\n\n",
+            "func main() {\n",
+            "  int x = ((1 + 2) * (3 + 4));\n",
+            "  if (x > 0) {\n",
+            "    print x;\n",
+            "  } else {\n",
+            "    print 0;\n",
+            "  }\n",
+            "  return x;\n",
+            "}\n"
+        );
+        let program = parse_program(source).unwrap();
+        let candidates = ast_shrink_candidates(&program)
+            .into_iter()
+            .map(|candidate| emit_program(&candidate))
+            .collect::<Vec<_>>();
+
+        assert!(candidates
+            .iter()
+            .any(|candidate| !candidate.contains("func unused")));
+        assert!(candidates
+            .iter()
+            .any(|candidate| !candidate.contains("if (")));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.contains("int x = (1 + 2);")));
+    }
+
+    #[test]
+    fn shrinker_preserves_matching_failure_kind() {
         let source = concat!(
             "func main() {\n",
             "  int x = 1;\n",
@@ -1136,7 +1982,7 @@ mod tests {
         );
 
         let shrunk = shrink_source(source, "compile");
-        assert!(!shrunk.contains("print x;"));
+        assert!(shrunk.len() < source.len(), "{shrunk}");
         assert!(has_same_failure(&shrunk, "compile"));
     }
 

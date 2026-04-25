@@ -58,6 +58,9 @@ cargo run --locked --release -- examples/hello.lang --trace-diff --audit-json tr
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts/seed-5eed --fuzz-json fuzz-summary-5eed.json
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts fuzz-artifacts/seed-c0ffee --fuzz-json fuzz-summary-c0ffee.json
 
+# Stress the optimizer-specific generator family
+cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xbadc0de --fuzz-mode optimizer-stress --fuzz-artifacts fuzz-artifacts/optimizer --fuzz-json fuzz-optimizer.json
+
 # Run with JIT compiler when the bytecode is eligible (Linux x86-64 only)
 cargo run --locked --release -- examples/fibonacci.lang --jit
 
@@ -68,9 +71,10 @@ cargo run --locked --release -- examples/fibonacci.lang --bench
 cargo run --locked --release -- examples/fibonacci.lang --stats
 ```
 
-The JIT is deliberately gated. It accepts only a small linear expression subset
-on Linux x86-64; unsupported bytecode is skipped by the comparator and falls
-back to the VM in normal `--jit` execution.
+The JIT is deliberately gated. It accepts only a small linear scalar subset
+on Linux x86-64, now including local load/store bytecode after verifier and
+backend-comparator proof gates. Unsupported bytecode is skipped by the
+comparator and falls back to the VM in normal `--jit` execution.
 
 See [`docs/correctness-lab.md`](docs/correctness-lab.md) for the audit workflow
 and what each command proves.
@@ -136,11 +140,13 @@ Trace-level determinism and divergence reports:
 
 Deterministic generated-program testing:
 - `--fuzz <cases>` generates valid, terminating MiniLang programs from a seed
-- Generated programs cover initialized scalars, bounded loops, helper functions, prints, and in-bounds global/local array reads/writes
+- Generated programs cover initialized scalars, bounded loops, helper functions, prints, in-bounds global/local array reads/writes, loop-indexed array writes, and helper calls fed by local-array reads
 - Every case runs compile, verification, backend comparison, trace replay, and VM/GC trace diff
+- `--fuzz-mode optimizer-stress` generates programs shaped around constant folding, strength reduction, jump/control-flow remapping, dead-code elimination, and stack-effect preservation
 - Reports generator feature coverage and can write a machine-readable run summary with `--fuzz-json <file>`
-- On first failure, the fuzzer shrinks the repro and writes source, bytecode, traces, a manifest, and failure metadata under `fuzz-artifacts/`
-- CI runs two fixed-seed fuzz audits on Linux, uploads fuzz summary JSON, and uploads `fuzz-artifacts/` when the fuzz step fails
+- On first failure, the AST-aware shrinker tries function, statement, branch, expression, and array-operation reductions before falling back to line removal
+- Failure artifacts include source, bytecode, traces, a manifest, and failure metadata under `fuzz-artifacts/`; `--fuzz-corpus-out <dir>` can also save the minimized repro directly into a regression corpus
+- CI runs a seed/mode fuzz matrix on pushes and a larger scheduled nightly fuzz audit
 
 ## Runtime And Systems Components
 
@@ -163,8 +169,8 @@ Mark-sweep GC primitives plus a GC-integrated VM path:
 
 x86-64 native code generation:
 - Direct machine code emission with mmap/mprotect on Linux x86-64
-- Current scope: linear, pure, single-function expression bytecode
-- Unsupported bytecode, including locals, globals, arrays, calls, jumps, division, and `print`, falls back to the VM
+- Current scope: linear, pure, single-function scalar bytecode with constants, arithmetic/comparison/logical stack ops, and scalar locals
+- Unsupported bytecode, including globals, arrays, calls, jumps, division, and `print`, falls back to the VM
 
 ### Memory Allocators (`src/alloc.rs`)
 

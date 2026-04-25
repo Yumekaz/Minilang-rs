@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use minilang::{
     compare_backends, compiler::disassemble, diff_vm_gc_traces, replay_vm_trace, run_fuzzer,
-    Compiler, FuzzConfig, GcVm, JitCompiler, Lexer, Optimizer, Parser, Repl, SemanticAnalyzer,
-    Verifier, Vm,
+    Compiler, FuzzConfig, FuzzMode, GcVm, JitCompiler, Lexer, Optimizer, Parser, Repl,
+    SemanticAnalyzer, Verifier, Vm,
 };
 
 fn print_usage() {
@@ -48,8 +48,12 @@ fn print_usage() {
     eprintln!("               Seed for --fuzz (decimal or 0x-prefixed hex)");
     eprintln!("  --fuzz-artifacts <dir>");
     eprintln!("               Directory for minimized failing repro artifacts");
+    eprintln!("  --fuzz-corpus-out <dir>");
+    eprintln!("               Save minimized failing repros into a regression corpus directory");
     eprintln!("  --fuzz-json <file>");
     eprintln!("               Write a machine-readable fuzz audit summary");
+    eprintln!("  --fuzz-mode <general|optimizer-stress>");
+    eprintln!("               Select generated program family");
     eprintln!("  --fuzz-max-expr-depth <n>");
     eprintln!("               Maximum generated expression depth");
     eprintln!("  --fuzz-max-statements <n>");
@@ -90,11 +94,13 @@ fn main() {
     let mut fuzz_cases: Option<usize> = None;
     let mut fuzz_seed: Option<u64> = None;
     let mut fuzz_artifacts: Option<PathBuf> = None;
+    let mut fuzz_corpus_out: Option<PathBuf> = None;
     let mut fuzz_json_path: Option<PathBuf> = None;
     let mut fuzz_max_expr_depth: Option<usize> = None;
     let mut fuzz_max_statements: Option<usize> = None;
     let mut fuzz_shrink = true;
     let mut fuzz_write_artifacts = true;
+    let mut fuzz_mode = FuzzMode::General;
     let mut use_opt = false;
     let mut start_repl = false;
     let mut eval_expr: Option<String> = None;
@@ -160,12 +166,30 @@ fn main() {
                     process::exit(1);
                 }
             }
+            "--fuzz-corpus-out" => {
+                i += 1;
+                if i < args.len() {
+                    fuzz_corpus_out = Some(PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("Error: --fuzz-corpus-out requires a directory");
+                    process::exit(1);
+                }
+            }
             "--fuzz-json" => {
                 i += 1;
                 if i < args.len() {
                     fuzz_json_path = Some(PathBuf::from(&args[i]));
                 } else {
                     eprintln!("Error: --fuzz-json requires an output file");
+                    process::exit(1);
+                }
+            }
+            "--fuzz-mode" => {
+                i += 1;
+                if i < args.len() {
+                    fuzz_mode = parse_fuzz_mode(&args[i]);
+                } else {
+                    eprintln!("Error: --fuzz-mode requires general or optimizer-stress");
                     process::exit(1);
                 }
             }
@@ -221,7 +245,7 @@ fn main() {
 
         let default_config = FuzzConfig::default();
         let artifact_dir = if fuzz_write_artifacts {
-            fuzz_artifacts.or(default_config.artifact_dir)
+            fuzz_artifacts.clone().or(default_config.artifact_dir)
         } else {
             None
         };
@@ -231,7 +255,9 @@ fn main() {
             max_expr_depth: fuzz_max_expr_depth.unwrap_or(default_config.max_expr_depth),
             max_statements: fuzz_max_statements.unwrap_or(default_config.max_statements),
             artifact_dir,
+            corpus_dir: fuzz_corpus_out.clone(),
             shrink: fuzz_shrink,
+            mode: fuzz_mode,
         });
         println!("{}", report);
         if let Some(path) = fuzz_json_path {
@@ -246,8 +272,10 @@ fn main() {
     if fuzz_json_path.is_some()
         || fuzz_seed.is_some()
         || fuzz_artifacts.is_some()
+        || fuzz_corpus_out.is_some()
         || fuzz_max_expr_depth.is_some()
         || fuzz_max_statements.is_some()
+        || fuzz_mode != FuzzMode::General
         || !fuzz_shrink
         || !fuzz_write_artifacts
     {
@@ -634,6 +662,20 @@ fn parse_u64_arg(name: &str, value: &str) -> u64 {
         Ok(seed) => seed,
         Err(_) => {
             eprintln!("Error: {} expects a decimal or 0x-prefixed seed", name);
+            process::exit(1);
+        }
+    }
+}
+
+fn parse_fuzz_mode(value: &str) -> FuzzMode {
+    match value {
+        "general" => FuzzMode::General,
+        "optimizer-stress" => FuzzMode::OptimizerStress,
+        _ => {
+            eprintln!(
+                "Error: --fuzz-mode expects general or optimizer-stress, got {}",
+                value
+            );
             process::exit(1);
         }
     }

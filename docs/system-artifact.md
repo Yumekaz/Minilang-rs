@@ -370,7 +370,7 @@ BOUNDARIES:
 │ Check program   │───────────────────────▶ return None
 │ subset          │                         (fallback to interp)
 └───────┬─────────┘
-        │ linear pure expression bytecode
+        │ linear pure scalar bytecode
         ▼
 ┌─────────────────┐
 │ emit_prologue() │  push rbp; mov rbp,rsp; sub rsp,8192
@@ -724,7 +724,7 @@ pub fn run_jit(source: &str) -> Result<i64, String>;  // Linux x86-64 only
 | Comparator | Backends | Observable behavior is success/trap status, return value, trap code, and output |
 | Trace audit | VM / GcVm | Semantic trace events must be replayable and diffable |
 | Fuzzer | Public pipeline | Generated cases must be valid, terminating programs before audit checks run |
-| JIT | Verifier | Only eligible linear, pure, single-function expression bytecode is compiled |
+| JIT | Verifier | Only eligible linear, pure, single-function scalar bytecode is compiled |
 | Optimizer | Compiler | Can modify instructions in-place |
 
 ### 10.3 CLI Interface

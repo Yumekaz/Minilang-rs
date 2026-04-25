@@ -1,0 +1,18 @@
+func main() {
+  int acc = ((3 + 4) * (5 + 1));
+  acc = (acc * 1);
+  acc = (acc + 0);
+  int i = 0;
+  while (i < 3) {
+    acc = (acc + ((i * 1) + 0));
+    i = (i + 1);
+  }
+  if (((1 + 1) == 2) && (acc != 999)) {
+    acc = (acc + (2 * 1));
+  } else {
+    acc = (acc + 999);
+  }
+  print (acc + 0);
+  return acc;
+  acc = (acc + 123);
+}

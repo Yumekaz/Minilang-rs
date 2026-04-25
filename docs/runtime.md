@@ -199,4 +199,6 @@ to write stable evidence JSON with trace summaries and fingerprints.
 case runs compile, verification, backend comparison, trace replay, and VM/GC
 trace diff. On failure it writes a minimized repro and trace artifacts when
 `--fuzz-artifacts` is provided. `--fuzz-json <file>` writes a machine-readable
-run summary with generator feature coverage.
+run summary with generator feature coverage. `--fuzz-mode optimizer-stress`
+switches to optimizer-shaped programs, and `--fuzz-corpus-out <dir>` saves
+minimized failures into a regression corpus for future test runs.

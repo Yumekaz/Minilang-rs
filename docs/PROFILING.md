@@ -23,10 +23,11 @@ func main() {
 | Interpreter + Opt | 0.74-0.78 | ~1.03x |
 | JIT            | N/A       | N/A     |
 
-The current JIT intentionally rejects loops, locals, globals, calls, arrays,
-division, and other bytecode that it cannot execute with the VM's safety
-semantics. The older 4x JIT number is not a valid claim for this benchmark until
-control-flow and local-variable lowering are implemented and re-measured.
+The current JIT intentionally rejects loops, globals, calls, arrays, division,
+and other bytecode that it cannot execute with the VM's safety semantics.
+Scalar local-variable load/store is supported, but this loop benchmark still
+requires control-flow lowering. The older 4x JIT number is not a valid claim for
+this benchmark until control-flow lowering is implemented and re-measured.
 
 ### Hot Path Analysis
 

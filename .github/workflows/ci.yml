@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -52,32 +54,6 @@ jobs:
       - name: Smoke Test
         run: cargo run --locked --release -- examples/hello.lang
 
-      - name: Fuzz Audit
-        id: fuzz_audit
-        run: |
-          status=0
-          cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts/seed-5eed --fuzz-json fuzz-summary-5eed.json || status=1
-          cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts fuzz-artifacts/seed-c0ffee --fuzz-json fuzz-summary-c0ffee.json || status=1
-          exit "$status"
-
-      - name: Upload Fuzz Summaries
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-summaries-${{ github.run_id }}
-          path: fuzz-summary-*.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload Fuzz Artifacts
-        if: failure() && steps.fuzz_audit.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-artifacts-${{ github.run_id }}
-          path: fuzz-artifacts
-          if-no-files-found: ignore
-          retention-days: 14
-
   windows:
     runs-on: windows-latest
     steps:
@@ -95,3 +71,54 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  fuzz:
+    runs-on: ubuntu-latest
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ["0x5eed", "0xc0ffee", "0xbadc0de", "0x51ced"]
+        mode: ["general", "optimizer-stress"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Release Build
+        run: cargo build --locked --release
+
+      - name: Push Fuzz Audit
+        id: fuzz_audit_push
+        if: github.event_name != 'schedule'
+        run: |
+          cargo run --locked --release -- --fuzz 150 --fuzz-seed ${{ matrix.seed }} --fuzz-mode ${{ matrix.mode }} --fuzz-artifacts fuzz-artifacts/${{ matrix.mode }}-${{ matrix.seed }} --fuzz-json fuzz-summary-${{ matrix.mode }}-${{ matrix.seed }}.json
+
+      - name: Nightly Fuzz Audit
+        id: fuzz_audit_nightly
+        if: github.event_name == 'schedule'
+        run: |
+          cargo run --locked --release -- --fuzz 1000 --fuzz-seed ${{ matrix.seed }} --fuzz-mode ${{ matrix.mode }} --fuzz-artifacts fuzz-artifacts/${{ matrix.mode }}-${{ matrix.seed }} --fuzz-json fuzz-summary-${{ matrix.mode }}-${{ matrix.seed }}.json
+
+      - name: Upload Fuzz Summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-summary-${{ matrix.mode }}-${{ matrix.seed }}-${{ github.run_id }}
+          path: fuzz-summary-*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload Fuzz Artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.mode }}-${{ matrix.seed }}-${{ github.run_id }}
+          path: fuzz-artifacts
+          if-no-files-found: ignore
+          retention-days: 14

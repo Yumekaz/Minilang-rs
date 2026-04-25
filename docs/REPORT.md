@@ -25,7 +25,7 @@ a production language or a broad compiler framework.
 | Backend comparator | Implemented | Compares VM, GC VM, optimized VM, and eligible JIT observable behavior |
 | Trace audit | Implemented | JSON traces, reference replay, VM-vs-GC trace diff |
 | Self-audit fuzzer | Implemented | Deterministic valid-program generation, shrinking, failure artifacts |
-| JIT | Experimental | Linux x86-64 only, linear pure expression subset |
+| JIT | Experimental | Linux x86-64 only, linear pure scalar subset with locals |
 
 ## Correctness Audit Commands
 
@@ -37,9 +37,11 @@ cargo run --locked --release -- examples/hello.lang --trace-replay --audit-json 
 cargo run --locked --release -- examples/hello.lang --trace-diff --audit-json trace-diff.audit.json
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts/seed-5eed --fuzz-json fuzz-summary-5eed.json
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts fuzz-artifacts/seed-c0ffee --fuzz-json fuzz-summary-c0ffee.json
+cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xbadc0de --fuzz-mode optimizer-stress --fuzz-artifacts fuzz-artifacts/optimizer --fuzz-json fuzz-optimizer.json
 ```
 
-CI runs the standard Rust checks plus two fixed-seed fuzz audits on Linux.
+CI runs the standard Rust checks plus a seed/mode fuzz matrix on Linux. The
+scheduled nightly workflow runs the same matrix with a larger case count.
 
 ## Systems Programming Features
 
@@ -145,8 +147,8 @@ Expressions evaluated: 2
 - REX prefixes for 64-bit operations
 - ModR/M byte encoding
 - System V AMD64 ABI compliance
-- Current program support is intentionally narrow: linear, pure, single-function expression bytecode only
-- Locals, globals, arrays, calls, jumps/control flow, division, and `print` fall back to the VM
+- Current program support is intentionally narrow: linear, pure, single-function scalar bytecode with local load/store
+- Globals, arrays, calls, jumps/control flow, division, and `print` fall back to the VM
 
 **Memory management:**
 - `mmap` for executable memory allocation
@@ -199,10 +201,17 @@ instruments -t "Time Profiler" ./target/release/minilang examples/bench.lang
 **Self-audit fuzzer (`src/fuzz.rs`):**
 - Generates valid terminating programs from deterministic seeds.
 - Covers scalar locals/globals, helper calls, bounded loops, prints, and
-  in-bounds global/local array reads and writes.
+  in-bounds global/local array reads and writes, including loop-indexed array
+  writes and helper calls fed by local-array reads.
+- Includes an optimizer-stress generation mode for constant folding, strength
+  reduction, jump remapping, dead-code elimination, and stack-effect checks.
 - Reports generator feature coverage, can write JSON run summaries, and on
-  failure writes minimized source, bytecode, trace JSON, a manifest, and
-  failure text under the selected `fuzz-artifacts/` directory.
+  failure uses AST-aware reductions before line removal, then writes minimized
+  source, bytecode, trace JSON, a manifest, and failure text under the selected
+  `fuzz-artifacts/` directory.
+- Can save minimized failures into `tests/corpus`, whose runner replays every
+  saved `.lang` file through verification, backend comparison, trace replay,
+  and VM/GC trace diff.
 
 ## Source Map
 
@@ -237,7 +246,8 @@ divergence reproducible instead of just saying a test failed."
 "The JIT compiler emits x86-64 machine code with REX prefixes, ModR/M encoding,
 and mmap/mprotect executable memory. It follows the System V AMD64 calling
 convention, but its supported source subset is deliberately small today: linear
-pure expressions in a single `main` function."
+pure scalar code in a single `main` function, including scalar locals only
+after verifier and backend-comparator proof gates."
 
 ### Optimization
 "I implemented classic compiler optimizations - constant folding evaluates expressions like `10 + 20` at compile time, strength reduction replaces expensive operations like `x * 1` with identity, and dead code elimination uses control flow analysis to remove unreachable instructions."
@@ -248,8 +258,8 @@ pure expressions in a single `main` function."
 ## Limitations
 
 - JIT only works on Linux x86-64
-- JIT only handles linear, pure, single-function expression bytecode
-- JIT rejects locals, globals, arrays, calls, jumps/control flow, division, and `print` instead of partially compiling unsafe behavior
+- JIT only handles linear, pure, single-function scalar bytecode
+- JIT supports scalar locals but rejects globals, arrays, calls, jumps/control flow, division, and `print` instead of partially compiling unsafe behavior
 - Arena-backed AST exists but is not the active parser representation
 - `runtime.rs` GC value abstractions are not the default VM value model
 - No register allocation in JIT (stack-based)

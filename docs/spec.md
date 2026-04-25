@@ -139,13 +139,13 @@ The GC VM must match the reference VM for programs that do not depend on backend
 allocation details.
 
 The hand-written x86-64 JIT is experimental. It currently targets Linux x86-64
-and only accepts linear, pure, single-function expression bytecode. Supported
-opcodes are constants, integer addition/subtraction/multiplication/negation,
-comparisons, logical not, stack pop/dup, and return.
+and only accepts linear, pure, single-function scalar bytecode. Supported
+opcodes are constants, scalar local load/store, integer
+addition/subtraction/multiplication/negation, comparisons, logical not, stack
+pop/dup, and return.
 
-Bytecode with locals, globals, arrays, function calls, jumps/control flow,
-division, `print`, or multiple functions is rejected by the JIT and falls back
-to the VM.
+Bytecode with globals, arrays, function calls, jumps/control flow, division,
+`print`, or multiple functions is rejected by the JIT and falls back to the VM.
 
 ## Verification And Audit Surface
 
@@ -169,6 +169,8 @@ evidence for either trace audit mode.
 verification, backend comparison, trace replay, and VM/GC trace diff for each
 case. The fuzzer reports generator feature coverage, can write a run summary
 with `--fuzz-json <file>`, and writes a manifest with failure artifacts when
-`--fuzz-artifacts <dir>` is enabled. The fuzzer is an audit harness for the
-implemented subset; it is not a complete proof of all possible MiniLang
-programs or malformed bytecode.
+`--fuzz-artifacts <dir>` is enabled. `--fuzz-mode optimizer-stress` targets the
+optimizer passes specifically, and `--fuzz-corpus-out <dir>` can save minimized
+failures into a regression corpus. The fuzzer is an audit harness for the
+implemented subset; it is not a complete proof of all possible MiniLang programs
+or malformed bytecode.

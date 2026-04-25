@@ -625,6 +625,8 @@ impl JitCompiler {
         matches!(
             opcode,
             Opcode::LoadConst
+                | Opcode::LoadLocal
+                | Opcode::StoreLocal
                 | Opcode::Add
                 | Opcode::Sub
                 | Opcode::Mul
@@ -1052,8 +1054,10 @@ mod tests {
     }
 
     #[test]
-    fn test_jit_rejects_locals() {
-        assert!(!jit_supports("func main() { int x = 1; return x; }"));
+    fn test_jit_supports_scalar_locals() {
+        assert!(jit_supports(
+            "func main() { int x = 1; int y = 2; return x + y; }"
+        ));
     }
 
     #[test]
@@ -1066,6 +1070,15 @@ mod tests {
     #[test]
     fn test_jit_rejects_print() {
         assert!(!jit_supports("func main() { print 1; return 0; }"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_jit_matches_vm_scalar_locals() {
+        assert_eq!(
+            run_jit_source("func main() { int x = 7; int y = (x * 3); return y - 1; }"),
+            20
+        );
     }
 
     #[test]

@@ -61,6 +61,7 @@ Run deterministic fuzz audits with the same seed shape used by CI:
 ```bash
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts/seed-5eed --fuzz-json fuzz-summary-5eed.json
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts fuzz-artifacts/seed-c0ffee --fuzz-json fuzz-summary-c0ffee.json
+cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xbadc0de --fuzz-mode optimizer-stress --fuzz-artifacts fuzz-artifacts/optimizer --fuzz-json fuzz-optimizer.json
 ```
 
 Run the broader Rust checks:
@@ -96,6 +97,20 @@ debuggable without rerunning a large random search. The manifest records the
 run seed, case seed, source hashes, case feature coverage, and the shortest
 fuzzer command that should reproduce the same failing case.
 
+The shrinker is AST-aware before it falls back to line removal. It tries to
+remove helper functions, reduce statement bodies, collapse branches, simplify
+expressions, and replace array operations with smaller equivalent candidates
+while preserving the same failure category.
+
+Use `--fuzz-corpus-out tests/corpus` when you intentionally want a minimized
+fuzzer failure to become a checked-in regression input. The corpus runner in
+`tests/corpus_tests.rs` sends every `tests/corpus/*.lang` file through
+verification, backend comparison, trace replay, and VM/GC trace diff.
+
+CI runs a seed/mode fuzz matrix on pushes. Scheduled runs use the same matrix
+with a larger case count so the cheap push signal stays quick while the nightly
+search gets broader coverage.
+
 ## Backend Boundaries
 
 The bytecode VM is the reference backend. The GC VM is expected to match it for
@@ -103,6 +118,7 @@ programs that do not depend on backend allocation internals. The optimized VM
 must preserve observable behavior after bytecode optimization.
 
 The JIT is intentionally narrow. On Linux x86-64 it accepts only linear, pure,
-single-function expression bytecode. Locals, globals, arrays, calls,
+single-function scalar bytecode with constants, arithmetic/comparison/logical
+stack operations, and scalar local load/store. Globals, arrays, calls,
 control-flow jumps, division, `print`, and multiple functions are rejected for
 JIT execution and handled by the VM path.

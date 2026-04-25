@@ -988,6 +988,8 @@ fn jit_supports_opcode(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::LoadConst
+            | Opcode::LoadLocal
+            | Opcode::StoreLocal
             | Opcode::Add
             | Opcode::Sub
             | Opcode::Mul
