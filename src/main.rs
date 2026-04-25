@@ -235,7 +235,7 @@ fn main() {
         });
         println!("{}", report);
         if let Some(path) = fuzz_json_path {
-            if let Err(e) = fs::write(&path, report.to_json()) {
+            if let Err(e) = fs::write(path.as_path(), report.to_json()) {
                 eprintln!("Error writing fuzz JSON to {}: {}", path.display(), e);
                 process::exit(1);
             }

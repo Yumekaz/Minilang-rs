@@ -139,6 +139,18 @@ struct ProgramGenerator {
     next_var: usize,
 }
 
+struct FailureArtifactInput<'a> {
+    base_dir: &'a Path,
+    run_seed: u64,
+    case_index: usize,
+    case_seed: u64,
+    reason: &'a FuzzFailureReason,
+    original_source: &'a str,
+    minimized_source: &'a str,
+    coverage: &'a FuzzCoverage,
+    case_features: &'a FeatureSet,
+}
+
 #[derive(Debug, Clone)]
 struct Rng {
     state: u64,
@@ -165,22 +177,20 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
             let coverage_at_failure = coverage.clone();
 
             let (artifacts_dir, artifact_error) = match &config.artifact_dir {
-                Some(base_dir) => {
-                    match write_failure_artifacts(
-                        base_dir,
-                        config.seed,
-                        case_index,
-                        case_seed,
-                        &reason,
-                        &generated.source,
-                        &minimized_source,
-                        &coverage_at_failure,
-                        &generated.features,
-                    ) {
-                        Ok(path) => (Some(path), None),
-                        Err(err) => (None, Some(err.to_string())),
-                    }
-                }
+                Some(base_dir) => match write_failure_artifacts(FailureArtifactInput {
+                    base_dir,
+                    run_seed: config.seed,
+                    case_index,
+                    case_seed,
+                    reason: &reason,
+                    original_source: &generated.source,
+                    minimized_source: &minimized_source,
+                    coverage: &coverage_at_failure,
+                    case_features: &generated.features,
+                }) {
+                    Ok(path) => (Some(path), None),
+                    Err(err) => (None, Some(err.to_string())),
+                },
                 None => (None, None),
             };
 
@@ -347,41 +357,19 @@ fn has_same_failure(source: &str, reason_tag: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn write_failure_artifacts(
-    base_dir: &Path,
-    run_seed: u64,
-    case_index: usize,
-    case_seed: u64,
-    reason: &FuzzFailureReason,
-    original_source: &str,
-    minimized_source: &str,
-    coverage: &FuzzCoverage,
-    case_features: &FeatureSet,
-) -> io::Result<PathBuf> {
-    let case_dir = base_dir.join(format!(
+fn write_failure_artifacts(input: FailureArtifactInput<'_>) -> io::Result<PathBuf> {
+    let case_dir = input.base_dir.join(format!(
         "seed_{:016x}_case_{:04}_case_seed_{:016x}",
-        run_seed, case_index, case_seed
+        input.run_seed, input.case_index, input.case_seed
     ));
     fs::create_dir_all(&case_dir)?;
 
-    fs::write(case_dir.join("original.lang"), original_source)?;
-    fs::write(case_dir.join("minimized.lang"), minimized_source)?;
-    fs::write(case_dir.join("failure.txt"), reason.to_string())?;
-    fs::write(
-        case_dir.join("manifest.txt"),
-        failure_manifest(
-            run_seed,
-            case_index,
-            case_seed,
-            reason,
-            original_source,
-            minimized_source,
-            coverage,
-            case_features,
-        ),
-    )?;
+    fs::write(case_dir.join("original.lang"), input.original_source)?;
+    fs::write(case_dir.join("minimized.lang"), input.minimized_source)?;
+    fs::write(case_dir.join("failure.txt"), input.reason.to_string())?;
+    fs::write(case_dir.join("manifest.txt"), failure_manifest(&input))?;
 
-    if let Ok(compiled) = compile(minimized_source) {
+    if let Ok(compiled) = compile(input.minimized_source) {
         fs::write(case_dir.join("bytecode.txt"), disassemble(&compiled))?;
         write_trace_artifacts(&case_dir, &compiled)?;
     }
@@ -389,33 +377,28 @@ fn write_failure_artifacts(
     Ok(case_dir)
 }
 
-fn failure_manifest(
-    run_seed: u64,
-    case_index: usize,
-    case_seed: u64,
-    reason: &FuzzFailureReason,
-    original_source: &str,
-    minimized_source: &str,
-    coverage: &FuzzCoverage,
-    case_features: &FeatureSet,
-) -> String {
+fn failure_manifest(input: &FailureArtifactInput<'_>) -> String {
     format!(
         "MiniLang Fuzz Failure Manifest\n\
-         run_seed: {run_seed:#018x}\n\
-         case_index: {case_index}\n\
-         case_seed: {case_seed:#018x}\n\
+         run_seed: {:#018x}\n\
+         case_index: {}\n\
+         case_seed: {:#018x}\n\
          reason: {}\n\
          original_source_hash: {:016x}\n\
          minimized_source_hash: {:016x}\n\
-         repro_command: minilang --fuzz {} --fuzz-seed {run_seed:#018x}\n\
+         repro_command: minilang --fuzz {} --fuzz-seed {:#018x}\n\
          case_features: {}\n\
          run_coverage_at_failure:\n{}",
-        reason.tag(),
-        stable_hash(original_source),
-        stable_hash(minimized_source),
-        case_index + 1,
-        format_feature_set(case_features),
-        coverage
+        input.run_seed,
+        input.case_index,
+        input.case_seed,
+        input.reason.tag(),
+        stable_hash(input.original_source),
+        stable_hash(input.minimized_source),
+        input.case_index + 1,
+        input.run_seed,
+        format_feature_set(input.case_features),
+        input.coverage
     )
 }
 
@@ -1165,16 +1148,18 @@ mod tests {
         features.record_array_write(ArrayScope::Local);
         coverage.observe(&features);
 
-        let manifest = failure_manifest(
-            0x5eed,
-            3,
-            0x1234,
-            &FuzzFailureReason::TraceDiff("different stack".to_string()),
-            "func main() { return 1; }\n",
-            "func main() { return 1; }\n",
-            &coverage,
-            &features,
-        );
+        let reason = FuzzFailureReason::TraceDiff("different stack".to_string());
+        let manifest = failure_manifest(&FailureArtifactInput {
+            base_dir: Path::new("unused"),
+            run_seed: 0x5eed,
+            case_index: 3,
+            case_seed: 0x1234,
+            reason: &reason,
+            original_source: "func main() { return 1; }\n",
+            minimized_source: "func main() { return 1; }\n",
+            coverage: &coverage,
+            case_features: &features,
+        });
 
         assert!(manifest.contains("case_index: 3"));
         assert!(manifest.contains("reason: trace-diff"));
