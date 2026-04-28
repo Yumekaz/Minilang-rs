@@ -43,7 +43,20 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --locked --all-targets --all-features
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked --all-targets --all-features 2>&1 | tee cargo-test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          text = "\n".join(Path("cargo-test.log").read_text(errors="replace").splitlines()[-120:])
+          text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error title=Linux cargo test failed::{text}")
+          PY
+            exit "$status"
+          fi
 
       - name: Release Build
         run: cargo build --locked --release
@@ -84,7 +97,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Test
-        run: cargo test --locked
+        run: |
+          cargo test --locked *> cargo-test.log
+          $status = $LASTEXITCODE
+          if ($status -ne 0) {
+            $text = (Get-Content cargo-test.log -Tail 120) -join "`n"
+            $text = $text.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Output "::error title=Windows cargo test failed::$text"
+            exit $status
+          }
 
   fuzz:
     runs-on: ubuntu-latest
