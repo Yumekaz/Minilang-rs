@@ -347,8 +347,30 @@ impl FuzzFailureReason {
     }
 
     fn fingerprint(&self) -> u64 {
-        stable_hash(&self.to_string())
+        let mut payload = String::new();
+        payload.push_str(self.tag());
+        payload.push(':');
+        payload.push_str(&normalize_failure_message(&self.to_string()));
+        stable_hash(&payload)
     }
+}
+
+fn normalize_failure_message(message: &str) -> String {
+    message
+        .lines()
+        .map(normalize_failure_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_failure_line(line: &str) -> String {
+    let Some(rest) = line.strip_prefix("compile failure: Semantic error at ") else {
+        return line.to_string();
+    };
+    let Some((_, message)) = rest.split_once(": ") else {
+        return line.to_string();
+    };
+    format!("compile failure: Semantic error at <span>: {}", message)
 }
 
 impl FuzzMode {
@@ -2504,6 +2526,18 @@ mod tests {
         let shrunk = shrink_source(source, signature);
         assert!(shrunk.len() < source.len(), "{shrunk}");
         assert!(has_same_failure(&shrunk, signature));
+    }
+
+    #[test]
+    fn failure_fingerprint_ignores_source_span_noise() {
+        let left = FuzzFailureReason::Compile(
+            "Semantic error at 3:10: Undefined variable: missing".to_string(),
+        );
+        let right = FuzzFailureReason::Compile(
+            "Semantic error at 9:2: Undefined variable: missing".to_string(),
+        );
+
+        assert_eq!(left.fingerprint(), right.fingerprint());
     }
 
     #[test]
