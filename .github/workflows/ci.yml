@@ -54,6 +54,20 @@ jobs:
       - name: Smoke Test
         run: cargo run --locked --release -- examples/hello.lang
 
+      - name: AST Oracle Smoke
+        run: cargo run --locked --release -- examples/hello.lang --oracle
+
+      - name: Evidence Report Smoke
+        run: cargo run --locked --release -- --evidence-report evidence/ci --evidence-fuzz 1
+
+      - name: Upload Evidence Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-report-${{ github.run_id }}
+          path: evidence/ci
+          if-no-files-found: error
+          retention-days: 14
+
   windows:
     runs-on: windows-latest
     steps:

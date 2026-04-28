@@ -3,7 +3,7 @@ name = "minilang"
 version = "0.1.0"
 edition = "2021"
 authors = ["Systems Engineer"]
-description = "A minimal language compiler with JIT, custom allocator, and GC"
+description = "Qydrel: a Rust compiler/VM correctness engine with oracle, traces, fuzzing, and backend equivalence checks"
 
 [dependencies]
 thiserror = "1.0"

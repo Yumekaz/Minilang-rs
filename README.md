@@ -1,16 +1,19 @@
-# MiniLang - Compiler Correctness Lab in Rust
+# Qydrel
 
-MiniLang is a small Rust compiler/runtime used to check how one source program
-behaves across several execution paths. The core story is not language breadth;
-it is a verifier, backend comparison, replayable traces, VM/GC trace diffs, and
-a deterministic self-audit fuzzer.
+Qydrel is a Rust compiler/VM correctness engine built around a deliberately
+small source language. The core story is not language breadth; it is independent
+source-level oracle execution, bytecode verification, backend equivalence,
+replayable traces, VM/GC trace diffs, metamorphic fuzzing, shrinking, and
+evidence reports.
 
 Current surface:
 - **Frontend pipeline**: lexer, parser, semantic analyzer, bytecode compiler
+- **AST oracle**: independent source interpreter compared against executable backends
 - **Bytecode verifier**: stack effects, control-flow targets, slots, calls, limits, and backend eligibility
 - **Backend comparison**: reference VM, GC VM, optimized VM, and JIT when eligible
 - **Trace audit tooling**: JSON traces, replay checks, and VM-vs-GC instruction diffs
-- **Self-audit fuzzer**: deterministic valid-program generation with shrinking and artifacts
+- **Self-audit fuzzer**: deterministic valid-program generation, coverage-guided candidate selection, metamorphic variants, exact failure fingerprints, shrinking, and artifacts
+- **Evidence report**: one command writes corpus, fuzz, backend, trace, and historical-artifact summaries
 - **Runtime systems pieces**: custom allocators, mark-sweep GC primitives, and a narrow x86-64 JIT
 
 This is intentionally not a production language. The language stays small so
@@ -42,6 +45,9 @@ cargo run --locked --release -- examples/fibonacci.lang --ir
 # Verify bytecode safety and backend eligibility
 cargo run --locked --release -- examples/fibonacci.lang --verify
 
+# Compare the independent AST oracle with executable backends
+cargo run --locked --release -- examples/fibonacci.lang --oracle
+
 # Compare observable behavior across VM backends
 cargo run --locked --release -- examples/fibonacci.lang --compare-backends
 
@@ -60,6 +66,9 @@ cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts
 
 # Stress the optimizer-specific generator family
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xbadc0de --fuzz-mode optimizer-stress --fuzz-artifacts fuzz-artifacts/optimizer --fuzz-json fuzz-optimizer.json
+
+# Write a reviewer-facing evidence packet
+cargo run --locked --release -- --evidence-report evidence/latest
 
 # Run with JIT compiler when the bytecode is eligible (Linux x86-64 only)
 cargo run --locked --release -- examples/fibonacci.lang --jit
@@ -94,10 +103,12 @@ src/
 ├── optimizer.rs    # Bytecode optimization passes
 ├── limits.rs       # Shared runtime/verifier limits
 ├── verifier.rs     # Structural bytecode verifier and backend eligibility
+├── oracle.rs       # Independent AST interpreter oracle
 ├── compare.rs      # Observable backend comparison
 ├── trace.rs        # Replay-oriented instruction trace model
 ├── audit.rs        # Trace replay and backend trace diff reports
 ├── fuzz.rs         # Deterministic self-audit fuzzer and shrinker
+├── evidence.rs     # One-command JSON/Markdown evidence report
 ├── vm.rs           # Stack-based VM interpreter
 ├── gc_vm.rs        # GC-integrated VM
 ├── jit.rs          # x86-64 JIT compiler
@@ -109,6 +120,13 @@ src/
 ```
 
 ## Correctness Lab Surface
+
+### AST Oracle (`src/oracle.rs`)
+
+Independent source-level oracle:
+- Executes the parsed AST directly, without bytecode VM execution
+- Mirrors source-reachable traps such as divide-by-zero, undefined locals, array bounds, frame limits, and cycle limits
+- Powers `--oracle` and is now part of fuzz/corpus/evidence auditing
 
 ### Bytecode Verifier (`src/verifier.rs`)
 
@@ -141,12 +159,21 @@ Trace-level determinism and divergence reports:
 Deterministic generated-program testing:
 - `--fuzz <cases>` generates valid, terminating MiniLang programs from a seed
 - Generated programs cover initialized scalars, bounded loops, helper functions, prints, in-bounds global/local array reads/writes, loop-indexed array writes, and helper calls fed by local-array reads
-- Every case runs compile, verification, backend comparison, trace replay, and VM/GC trace diff
+- Every case runs compile, verification, AST-oracle comparison, backend comparison, trace replay, VM/GC trace diff, and metamorphic-equivalence checks
+- Coverage-guided candidate selection prefers generated programs that add new feature/opcode coverage
 - `--fuzz-mode optimizer-stress` generates programs shaped around constant folding, strength reduction, jump/control-flow remapping, dead-code elimination, and stack-effect preservation
 - Reports generator feature coverage and can write a machine-readable run summary with `--fuzz-json <file>`
-- On first failure, the AST-aware shrinker tries function, statement, branch, expression, and array-operation reductions before falling back to line removal
+- On first failure, the AST-aware shrinker tries function, statement, branch, expression, and array-operation reductions before falling back to line removal while preserving the same failure fingerprint
 - Failure artifacts include source, bytecode, traces, a manifest, and failure metadata under `fuzz-artifacts/`; `--fuzz-corpus-out <dir>` can also save the minimized repro directly into a regression corpus
 - CI runs a seed/mode fuzz matrix on pushes and a larger scheduled nightly fuzz audit
+
+### Evidence Report (`src/evidence.rs`)
+
+Reviewer-facing proof packet:
+- `--evidence-report <dir>` writes `report.json` and `report.md`
+- Audits every `tests/corpus/*.lang` file through verifier, AST oracle, backend matrix, trace replay, and VM/GC trace diff
+- Runs the seed/mode fuzz matrix and summarizes feature/opcode coverage
+- Scans existing minimized fuzz artifacts so historical bugs are visible instead of buried in local folders
 
 ## Runtime And Systems Components
 

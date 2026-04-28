@@ -9,9 +9,9 @@ use std::process;
 use std::time::Instant;
 
 use minilang::{
-    compare_backends, compiler::disassemble, diff_vm_gc_traces, replay_vm_trace, run_fuzzer,
-    Compiler, FuzzConfig, FuzzMode, GcVm, JitCompiler, Lexer, Optimizer, Parser, Repl,
-    SemanticAnalyzer, Verifier, Vm,
+    compare_ast_oracle, compare_backends, compiler::disassemble, diff_vm_gc_traces,
+    generate_evidence_report, replay_vm_trace, run_fuzzer, Compiler, EvidenceConfig, FuzzConfig,
+    FuzzMode, GcVm, JitCompiler, Lexer, Optimizer, Parser, Repl, SemanticAnalyzer, Verifier, Vm,
 };
 
 fn print_usage() {
@@ -24,6 +24,7 @@ fn print_usage() {
     eprintln!("  --ast        Print AST and exit");
     eprintln!("  --ir         Print bytecode IR");
     eprintln!("  --verify     Verify bytecode safety and backend eligibility");
+    eprintln!("  --oracle     Compare AST interpreter oracle against executable backends");
     eprintln!("  --compare-backends");
     eprintln!(
         "               Run VM, GC VM, optimized VM, and JIT when eligible, then compare results"
@@ -60,8 +61,14 @@ fn print_usage() {
     eprintln!("               Maximum generated statements per main function");
     eprintln!("  --fuzz-no-shrink");
     eprintln!("               Keep the first failing generated program without shrinking");
+    eprintln!("  --fuzz-no-coverage-guidance");
+    eprintln!("               Disable candidate selection by new feature/opcode coverage");
     eprintln!("  --fuzz-no-artifacts");
     eprintln!("               Disable failure artifact output");
+    eprintln!("  --evidence-report <dir>");
+    eprintln!("               Write Qydrel corpus/fuzz/backend evidence report JSON and Markdown");
+    eprintln!("  --evidence-fuzz <cases>");
+    eprintln!("               Cases per seed/mode for --evidence-report");
     eprintln!("  --repl       Start interactive REPL");
     eprintln!("  --eval <e>   Evaluate expression and exit");
     eprintln!("  --no-color   Disable color output (no-op, for compatibility)");
@@ -81,6 +88,7 @@ fn main() {
     let mut show_ast = false;
     let mut show_ir = false;
     let mut verify = false;
+    let mut oracle = false;
     let mut compare = false;
     let mut use_jit = false;
     let mut use_gc = false;
@@ -100,7 +108,10 @@ fn main() {
     let mut fuzz_max_statements: Option<usize> = None;
     let mut fuzz_shrink = true;
     let mut fuzz_write_artifacts = true;
+    let mut fuzz_coverage_guided = true;
     let mut fuzz_mode = FuzzMode::General;
+    let mut evidence_report_dir: Option<PathBuf> = None;
+    let mut evidence_fuzz_cases: Option<usize> = None;
     let mut use_opt = false;
     let mut start_repl = false;
     let mut eval_expr: Option<String> = None;
@@ -112,6 +123,7 @@ fn main() {
             "--ast" => show_ast = true,
             "--ir" => show_ir = true,
             "--verify" => verify = true,
+            "--oracle" => oracle = true,
             "--compare-backends" => compare = true,
             "--opt" => use_opt = true,
             "--gc" => use_gc = true,
@@ -212,7 +224,26 @@ fn main() {
                 }
             }
             "--fuzz-no-shrink" => fuzz_shrink = false,
+            "--fuzz-no-coverage-guidance" => fuzz_coverage_guided = false,
             "--fuzz-no-artifacts" => fuzz_write_artifacts = false,
+            "--evidence-report" => {
+                i += 1;
+                if i < args.len() {
+                    evidence_report_dir = Some(PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("Error: --evidence-report requires an output directory");
+                    process::exit(1);
+                }
+            }
+            "--evidence-fuzz" => {
+                i += 1;
+                if i < args.len() {
+                    evidence_fuzz_cases = Some(parse_usize_arg("--evidence-fuzz", &args[i]));
+                } else {
+                    eprintln!("Error: --evidence-fuzz requires a case count");
+                    process::exit(1);
+                }
+            }
             "--repl" => start_repl = true,
             "--eval" => {
                 i += 1;
@@ -258,6 +289,7 @@ fn main() {
             corpus_dir: fuzz_corpus_out.clone(),
             shrink: fuzz_shrink,
             mode: fuzz_mode,
+            coverage_guided: fuzz_coverage_guided,
         });
         println!("{}", report);
         if let Some(path) = fuzz_json_path {
@@ -277,9 +309,46 @@ fn main() {
         || fuzz_max_statements.is_some()
         || fuzz_mode != FuzzMode::General
         || !fuzz_shrink
+        || !fuzz_coverage_guided
         || !fuzz_write_artifacts
     {
         eprintln!("Error: fuzz tuning options require --fuzz <cases>");
+        process::exit(1);
+    }
+
+    if let Some(output_dir) = evidence_report_dir {
+        let default_config = EvidenceConfig::default();
+        match generate_evidence_report(EvidenceConfig {
+            output_dir,
+            fuzz_cases: evidence_fuzz_cases.unwrap_or(default_config.fuzz_cases),
+            ..default_config
+        }) {
+            Ok(report) => {
+                println!(
+                    "Qydrel evidence report: {}",
+                    if report.summary.passed {
+                        "passed"
+                    } else {
+                        "failed"
+                    }
+                );
+                println!("  corpus files: {}", report.summary.corpus_files);
+                println!("  fuzz runs: {}", report.summary.fuzz_runs);
+                println!(
+                    "  fuzz cases executed: {}",
+                    report.summary.fuzz_cases_executed
+                );
+                process::exit(if report.summary.passed { 0 } else { 1 });
+            }
+            Err(err) => {
+                eprintln!("Error writing evidence report: {}", err);
+                process::exit(1);
+            }
+        }
+    }
+
+    if evidence_fuzz_cases.is_some() {
+        eprintln!("Error: --evidence-fuzz requires --evidence-report <dir>");
         process::exit(1);
     }
 
@@ -399,6 +468,12 @@ fn main() {
         let report = Verifier::new().verify(&compiled);
         println!("{}", report);
         process::exit(if report.valid { 0 } else { 1 });
+    }
+
+    if oracle {
+        let report = compare_ast_oracle(&program, &compiled);
+        println!("{}", report);
+        process::exit(if report.equivalent { 0 } else { 1 });
     }
 
     if compare {

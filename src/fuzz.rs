@@ -7,14 +7,17 @@
 //! input.
 
 use crate::ast::{BinaryOp, Expr, Function, GlobalVar, Param, Program, Stmt, Type, UnaryOp};
-use crate::compiler::disassemble;
+use crate::compiler::{disassemble, Compiler, Opcode};
 use crate::gc_vm::GcVm;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::token::Span;
 use crate::vm::Vm;
 use crate::{
-    compare_backends, compile, diff_vm_gc_traces, replay_vm_trace, CompiledProgram, Verifier,
+    compare_ast_oracle, compile, diff_vm_gc_traces, replay_vm_trace, run_ast_oracle,
+    CompiledProgram, OracleOutcome, SemanticAnalyzer, Verifier,
 };
+use std::collections::BTreeSet;
 use std::fmt::{self, Write};
 use std::fs;
 use std::io;
@@ -36,6 +39,7 @@ pub struct FuzzConfig {
     pub corpus_dir: Option<PathBuf>,
     pub shrink: bool,
     pub mode: FuzzMode,
+    pub coverage_guided: bool,
 }
 
 /// Program family used by the deterministic generator.
@@ -60,6 +64,9 @@ pub struct FuzzReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FuzzCoverage {
     pub cases: usize,
+    pub coverage_guided_cases: usize,
+    pub oracle_comparisons: usize,
+    pub metamorphic_variants: usize,
     pub optimizer_stress_cases: usize,
     pub helper_functions: usize,
     pub helper_calls: usize,
@@ -74,6 +81,7 @@ pub struct FuzzCoverage {
     pub helper_array_interactions: usize,
     pub constant_fold_patterns: usize,
     pub dead_code_shapes: usize,
+    pub opcode_kinds: BTreeSet<String>,
 }
 
 /// First failing generated program, with minimized repro when shrinking is on.
@@ -82,6 +90,7 @@ pub struct FuzzFailure {
     pub case_index: usize,
     pub case_seed: u64,
     pub reason: FuzzFailureReason,
+    pub failure_fingerprint: u64,
     pub coverage_at_failure: FuzzCoverage,
     pub original_source: String,
     pub minimized_source: String,
@@ -94,9 +103,11 @@ pub struct FuzzFailure {
 pub enum FuzzFailureReason {
     Compile(String),
     Verification(String),
+    AstOracle(String),
     BackendComparison(String),
     TraceReplay(String),
     TraceDiff(String),
+    Metamorphic(String),
 }
 
 #[derive(Debug, Clone)]
@@ -167,10 +178,23 @@ struct FailureArtifactInput<'a> {
     case_index: usize,
     case_seed: u64,
     reason: &'a FuzzFailureReason,
+    failure_fingerprint: u64,
     original_source: &'a str,
     minimized_source: &'a str,
     coverage: &'a FuzzCoverage,
     case_features: &'a FeatureSet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FailureSignature {
+    tag: &'static str,
+    fingerprint: u64,
+}
+
+#[derive(Debug, Default)]
+struct GuidanceState {
+    features: BTreeSet<&'static str>,
+    opcodes: BTreeSet<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,21 +206,41 @@ struct Rng {
 pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
     let mut rng = Rng::new(config.seed);
     let mut coverage = FuzzCoverage::default();
+    let mut guidance = GuidanceState::default();
 
     for case_index in 0..config.cases {
         let case_seed = rng.next_u64();
-        let generated = match config.mode {
-            FuzzMode::General => {
-                ProgramGenerator::new(case_seed, config.max_expr_depth, config.max_statements)
-                    .generate()
-            }
-            FuzzMode::OptimizerStress => OptimizerStressGenerator::new(case_seed).generate(),
+        let generated = if config.coverage_guided {
+            generate_guided_program(
+                config.mode,
+                case_seed,
+                config.max_expr_depth,
+                config.max_statements,
+                &guidance,
+            )
+        } else {
+            generate_program_with_mode(
+                config.mode,
+                case_seed,
+                config.max_expr_depth,
+                config.max_statements,
+            )
         };
         coverage.observe(&generated.features);
+        if config.coverage_guided {
+            coverage.coverage_guided_cases += 1;
+        }
+        let opcode_names = compiled_opcode_names(&generated.source);
+        coverage.observe_opcodes(&opcode_names);
+        let metamorphic_variant_count = metamorphic_variants(&generated.source).len();
+        coverage.metamorphic_variants += metamorphic_variant_count;
+        coverage.oracle_comparisons += 1 + metamorphic_variant_count;
+        guidance.observe(&generated.features, &opcode_names);
 
         if let Some(reason) = audit_source(&generated.source) {
+            let signature = FailureSignature::from_reason(&reason);
             let minimized_source = if config.shrink {
-                shrink_source(&generated.source, reason.tag())
+                shrink_source(&generated.source, signature)
             } else {
                 generated.source.clone()
             };
@@ -209,6 +253,7 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
                     case_index,
                     case_seed,
                     reason: &reason,
+                    failure_fingerprint: signature.fingerprint,
                     original_source: &generated.source,
                     minimized_source: &minimized_source,
                     coverage: &coverage_at_failure,
@@ -243,6 +288,7 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
                     case_index,
                     case_seed,
                     reason,
+                    failure_fingerprint: signature.fingerprint,
                     coverage_at_failure,
                     original_source: generated.source,
                     minimized_source,
@@ -274,18 +320,42 @@ impl Default for FuzzConfig {
             corpus_dir: None,
             shrink: true,
             mode: FuzzMode::General,
+            coverage_guided: true,
         }
     }
 }
 
 impl FuzzFailureReason {
+    pub fn reason_tag(&self) -> &'static str {
+        self.tag()
+    }
+
+    pub fn stable_fingerprint(&self) -> u64 {
+        self.fingerprint()
+    }
+
     fn tag(&self) -> &'static str {
         match self {
             FuzzFailureReason::Compile(_) => "compile",
             FuzzFailureReason::Verification(_) => "verification",
+            FuzzFailureReason::AstOracle(_) => "ast-oracle",
             FuzzFailureReason::BackendComparison(_) => "backend-comparison",
             FuzzFailureReason::TraceReplay(_) => "trace-replay",
             FuzzFailureReason::TraceDiff(_) => "trace-diff",
+            FuzzFailureReason::Metamorphic(_) => "metamorphic",
+        }
+    }
+
+    fn fingerprint(&self) -> u64 {
+        stable_hash(&self.to_string())
+    }
+}
+
+impl FuzzMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FuzzMode::General => "general",
+            FuzzMode::OptimizerStress => "optimizer-stress",
         }
     }
 }
@@ -308,6 +378,21 @@ impl FuzzCoverage {
         self.constant_fold_patterns += usize::from(features.constant_fold_patterns);
         self.dead_code_shapes += usize::from(features.dead_code_shapes);
     }
+
+    fn observe_opcodes(&mut self, opcode_names: &BTreeSet<&'static str>) {
+        for opcode in opcode_names {
+            self.opcode_kinds.insert((*opcode).to_string());
+        }
+    }
+}
+
+impl FailureSignature {
+    fn from_reason(reason: &FuzzFailureReason) -> Self {
+        Self {
+            tag: reason.tag(),
+            fingerprint: reason.fingerprint(),
+        }
+    }
 }
 
 impl FeatureSet {
@@ -327,19 +412,29 @@ impl FeatureSet {
 }
 
 fn audit_source(source: &str) -> Option<FuzzFailureReason> {
-    let compiled = match compile(source) {
-        Ok(compiled) => compiled,
+    audit_source_core(source).or_else(|| audit_metamorphic_source(source))
+}
+
+fn audit_source_core(source: &str) -> Option<FuzzFailureReason> {
+    let program = match parse_checked_program(source) {
+        Ok(program) => program,
         Err(err) => return Some(FuzzFailureReason::Compile(err)),
     };
+    let compiled = Compiler::new().compile(&program).0;
 
     let verification = Verifier::new().verify(&compiled);
     if !verification.valid {
         return Some(FuzzFailureReason::Verification(verification.to_string()));
     }
 
-    let comparison = compare_backends(&compiled);
-    if !comparison.equivalent {
-        return Some(FuzzFailureReason::BackendComparison(comparison.to_string()));
+    let oracle = compare_ast_oracle(&program, &compiled);
+    if !oracle.backend_report.equivalent {
+        return Some(FuzzFailureReason::BackendComparison(
+            oracle.backend_report.to_string(),
+        ));
+    }
+    if !oracle.equivalent {
+        return Some(FuzzFailureReason::AstOracle(oracle.to_string()));
     }
 
     let replay = replay_vm_trace(&compiled);
@@ -355,12 +450,74 @@ fn audit_source(source: &str) -> Option<FuzzFailureReason> {
     None
 }
 
-fn shrink_source(source: &str, reason_tag: &str) -> String {
+fn audit_metamorphic_source(source: &str) -> Option<FuzzFailureReason> {
+    let original = match observable_source_outcome(source) {
+        Ok(outcome) => outcome,
+        Err(reason) => return Some(reason),
+    };
+
+    for (index, variant) in metamorphic_variants(source).into_iter().enumerate() {
+        if variant == source {
+            continue;
+        }
+        if let Some(reason) = audit_source_core(&variant) {
+            return Some(FuzzFailureReason::Metamorphic(format!(
+                "variant {} failed audit: {}",
+                index, reason
+            )));
+        }
+        let variant_outcome = match observable_source_outcome(&variant) {
+            Ok(outcome) => outcome,
+            Err(reason) => {
+                return Some(FuzzFailureReason::Metamorphic(format!(
+                    "variant {} could not produce an oracle outcome: {}",
+                    index, reason
+                )));
+            }
+        };
+        if variant_outcome != original {
+            return Some(FuzzFailureReason::Metamorphic(format!(
+                "variant {} changed observable behavior: {} vs {}",
+                index,
+                variant_outcome.summary(),
+                original.summary()
+            )));
+        }
+    }
+
+    None
+}
+
+fn observable_source_outcome(source: &str) -> Result<OracleOutcome, FuzzFailureReason> {
+    let program = parse_checked_program(source).map_err(FuzzFailureReason::Compile)?;
+    Ok(run_ast_oracle(&program))
+}
+
+fn parse_checked_program(source: &str) -> Result<Program, String> {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize();
+    let mut parser = Parser::new(tokens);
+    let program = parser
+        .parse()
+        .map_err(|err| format!("Parse error: {}", err))?;
+    SemanticAnalyzer::new()
+        .analyze(&program)
+        .map_err(|errors| {
+            errors
+                .iter()
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })?;
+    Ok(program)
+}
+
+fn shrink_source(source: &str, signature: FailureSignature) -> String {
     let mut current = source.to_string();
 
     for _ in 0..SHRINK_PASSES {
-        let Some(candidate) = find_ast_shrink(&current, reason_tag)
-            .or_else(|| find_line_removal_shrink(&current, reason_tag))
+        let Some(candidate) = find_ast_shrink(&current, signature)
+            .or_else(|| find_line_removal_shrink(&current, signature))
         else {
             break;
         };
@@ -370,11 +527,11 @@ fn shrink_source(source: &str, reason_tag: &str) -> String {
     current
 }
 
-fn find_ast_shrink(source: &str, reason_tag: &str) -> Option<String> {
+fn find_ast_shrink(source: &str, signature: FailureSignature) -> Option<String> {
     let program = parse_program(source)?;
     for candidate in ast_shrink_candidates(&program) {
         let candidate_source = emit_program(&candidate);
-        if candidate_source != source && has_same_failure(&candidate_source, reason_tag) {
+        if candidate_source != source && has_same_failure(&candidate_source, signature) {
             return Some(candidate_source);
         }
     }
@@ -691,7 +848,7 @@ fn expr_shrink_candidates(expr: &Expr) -> Vec<Expr> {
     }
 }
 
-fn find_line_removal_shrink(source: &str, reason_tag: &str) -> Option<String> {
+fn find_line_removal_shrink(source: &str, signature: FailureSignature) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
 
     for index in 0..lines.len() {
@@ -707,7 +864,7 @@ fn find_line_removal_shrink(source: &str, reason_tag: &str) -> Option<String> {
             .join("\n");
         let candidate = format!("{}\n", candidate);
 
-        if has_same_failure(&candidate, reason_tag) {
+        if has_same_failure(&candidate, signature) {
             return Some(candidate);
         }
     }
@@ -720,10 +877,302 @@ fn is_removable_line(line: &str) -> bool {
     trimmed.ends_with(';') && !trimmed.starts_with("return ")
 }
 
-fn has_same_failure(source: &str, reason_tag: &str) -> bool {
+fn has_same_failure(source: &str, signature: FailureSignature) -> bool {
     audit_source(source)
-        .map(|reason| reason.tag() == reason_tag)
+        .map(|reason| FailureSignature::from_reason(&reason) == signature)
         .unwrap_or(false)
+}
+
+fn generate_program_with_mode(
+    mode: FuzzMode,
+    seed: u64,
+    max_expr_depth: usize,
+    max_statements: usize,
+) -> GeneratedProgram {
+    match mode {
+        FuzzMode::General => ProgramGenerator::new(seed, max_expr_depth, max_statements).generate(),
+        FuzzMode::OptimizerStress => OptimizerStressGenerator::new(seed).generate(),
+    }
+}
+
+fn generate_guided_program(
+    mode: FuzzMode,
+    case_seed: u64,
+    max_expr_depth: usize,
+    max_statements: usize,
+    guidance: &GuidanceState,
+) -> GeneratedProgram {
+    const CANDIDATES: usize = 6;
+
+    let mut best = generate_program_with_mode(mode, case_seed, max_expr_depth, max_statements);
+    let mut best_score = guidance.score(&best, &compiled_opcode_names(&best.source));
+
+    for attempt in 1..CANDIDATES {
+        let seed = case_seed ^ (0x9E37_79B9_7F4A_7C15_u64.wrapping_mul((attempt as u64) + 1));
+        let candidate = generate_program_with_mode(mode, seed, max_expr_depth, max_statements);
+        let opcodes = compiled_opcode_names(&candidate.source);
+        let score = guidance.score(&candidate, &opcodes);
+        if score > best_score {
+            best = candidate;
+            best_score = score;
+        }
+    }
+
+    best
+}
+
+fn compiled_opcode_names(source: &str) -> BTreeSet<&'static str> {
+    compile(source)
+        .map(|compiled| {
+            compiled
+                .instructions
+                .iter()
+                .map(|instruction| opcode_name(instruction.opcode))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn opcode_name(opcode: Opcode) -> &'static str {
+    match opcode {
+        Opcode::LoadConst => "LoadConst",
+        Opcode::LoadLocal => "LoadLocal",
+        Opcode::StoreLocal => "StoreLocal",
+        Opcode::LoadGlobal => "LoadGlobal",
+        Opcode::StoreGlobal => "StoreGlobal",
+        Opcode::Add => "Add",
+        Opcode::Sub => "Sub",
+        Opcode::Mul => "Mul",
+        Opcode::Div => "Div",
+        Opcode::Neg => "Neg",
+        Opcode::Eq => "Eq",
+        Opcode::Ne => "Ne",
+        Opcode::Lt => "Lt",
+        Opcode::Gt => "Gt",
+        Opcode::Le => "Le",
+        Opcode::Ge => "Ge",
+        Opcode::And => "And",
+        Opcode::Or => "Or",
+        Opcode::Not => "Not",
+        Opcode::Jump => "Jump",
+        Opcode::JumpIfFalse => "JumpIfFalse",
+        Opcode::JumpIfTrue => "JumpIfTrue",
+        Opcode::Call => "Call",
+        Opcode::Return => "Return",
+        Opcode::ArrayLoad => "ArrayLoad",
+        Opcode::ArrayStore => "ArrayStore",
+        Opcode::ArrayNew => "ArrayNew",
+        Opcode::LocalArrayLoad => "LocalArrayLoad",
+        Opcode::LocalArrayStore => "LocalArrayStore",
+        Opcode::AllocArray => "AllocArray",
+        Opcode::Print => "Print",
+        Opcode::Pop => "Pop",
+        Opcode::Dup => "Dup",
+        Opcode::Halt => "Halt",
+    }
+}
+
+impl GuidanceState {
+    fn observe(&mut self, features: &FeatureSet, opcodes: &BTreeSet<&'static str>) {
+        self.features.extend(feature_names(features));
+        self.opcodes.extend(opcodes.iter().copied());
+    }
+
+    fn score(&self, generated: &GeneratedProgram, opcodes: &BTreeSet<&'static str>) -> usize {
+        let new_features = feature_names(&generated.features)
+            .into_iter()
+            .filter(|feature| !self.features.contains(feature))
+            .count();
+        let new_opcodes = opcodes
+            .iter()
+            .filter(|opcode| !self.opcodes.contains(**opcode))
+            .count();
+
+        new_opcodes * 5 + new_features * 3 + usize::from(generated.features.optimizer_stress)
+    }
+}
+
+fn feature_names(features: &FeatureSet) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if features.helper_functions {
+        names.push("helper-functions");
+    }
+    if features.helper_calls {
+        names.push("helper-calls");
+    }
+    if features.optimizer_stress {
+        names.push("optimizer-stress");
+    }
+    if features.branches {
+        names.push("branches");
+    }
+    if features.loops {
+        names.push("loops");
+    }
+    if features.prints {
+        names.push("prints");
+    }
+    if features.global_array_reads {
+        names.push("global-array-reads");
+    }
+    if features.global_array_writes {
+        names.push("global-array-writes");
+    }
+    if features.local_array_reads {
+        names.push("local-array-reads");
+    }
+    if features.local_array_writes {
+        names.push("local-array-writes");
+    }
+    if features.loop_indexed_array_writes {
+        names.push("loop-indexed-array-writes");
+    }
+    if features.helper_array_interactions {
+        names.push("helper-array-interactions");
+    }
+    if features.constant_fold_patterns {
+        names.push("constant-fold-patterns");
+    }
+    if features.dead_code_shapes {
+        names.push("dead-code-shapes");
+    }
+    names
+}
+
+fn metamorphic_variants(source: &str) -> Vec<String> {
+    let Some(program) = parse_program(source) else {
+        return Vec::new();
+    };
+
+    let mut variants = Vec::new();
+
+    let mut return_neutral = program.clone();
+    for function in &mut return_neutral.functions {
+        wrap_return_exprs_with_zero(&mut function.body);
+    }
+    variants.push(emit_program(&return_neutral));
+
+    let mut dead_branch = program.clone();
+    if let Some(main) = dead_branch
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+    {
+        main.body.insert(0, dead_print_branch());
+        variants.push(emit_program(&dead_branch));
+    }
+
+    let mut neutral_local = program;
+    if let Some(main) = neutral_local
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+    {
+        if !main
+            .body
+            .iter()
+            .any(|stmt| declares_name(stmt, "__qydrel_mm0"))
+        {
+            main.body.splice(0..0, neutral_local_statements());
+            variants.push(emit_program(&neutral_local));
+        }
+    }
+
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
+fn wrap_return_exprs_with_zero(stmts: &mut [Stmt]) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Return { value, span } => {
+                *value = Expr::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(value.clone()),
+                    right: Box::new(Expr::IntLiteral {
+                        value: 0,
+                        span: *span,
+                    }),
+                    span: *span,
+                };
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                wrap_return_exprs_with_zero(then_body);
+                if let Some(else_body) = else_body {
+                    wrap_return_exprs_with_zero(else_body);
+                }
+            }
+            Stmt::While { body, .. } => wrap_return_exprs_with_zero(body),
+            _ => {}
+        }
+    }
+}
+
+fn dead_print_branch() -> Stmt {
+    let span = Span::default();
+    Stmt::If {
+        condition: Expr::IntLiteral { value: 0, span },
+        then_body: vec![Stmt::Print {
+            value: Expr::IntLiteral {
+                value: 424242,
+                span,
+            },
+            span,
+        }],
+        else_body: None,
+        span,
+    }
+}
+
+fn neutral_local_statements() -> Vec<Stmt> {
+    let span = Span::default();
+    vec![
+        Stmt::VarDecl {
+            var_type: Type::Int,
+            name: "__qydrel_mm0".to_string(),
+            init_expr: Some(Expr::IntLiteral { value: 0, span }),
+            array_size: None,
+            span,
+        },
+        Stmt::Assign {
+            target: "__qydrel_mm0".to_string(),
+            index_expr: None,
+            value: Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier {
+                    name: "__qydrel_mm0".to_string(),
+                    span,
+                }),
+                right: Box::new(Expr::IntLiteral { value: 0, span }),
+                span,
+            },
+            span,
+        },
+    ]
+}
+
+fn declares_name(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::VarDecl { name: declared, .. } => declared == name,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            then_body.iter().any(|stmt| declares_name(stmt, name))
+                || else_body
+                    .as_ref()
+                    .map(|body| body.iter().any(|stmt| declares_name(stmt, name)))
+                    .unwrap_or(false)
+        }
+        Stmt::While { body, .. } => body.iter().any(|stmt| declares_name(stmt, name)),
+        _ => false,
+    }
 }
 
 fn emit_program(program: &Program) -> String {
@@ -980,6 +1429,7 @@ fn failure_manifest(input: &FailureArtifactInput<'_>) -> String {
          case_index: {}\n\
          case_seed: {:#018x}\n\
          reason: {}\n\
+         failure_fingerprint: {:016x}\n\
          original_source_hash: {:016x}\n\
          minimized_source_hash: {:016x}\n\
          repro_command: minilang --fuzz {} --fuzz-seed {:#018x}\n\
@@ -989,6 +1439,7 @@ fn failure_manifest(input: &FailureArtifactInput<'_>) -> String {
         input.case_index,
         input.case_seed,
         input.reason.tag(),
+        input.failure_fingerprint,
         stable_hash(input.original_source),
         stable_hash(input.minimized_source),
         input.case_index + 1,
@@ -1608,6 +2059,25 @@ impl FuzzReport {
 impl fmt::Display for FuzzCoverage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "  cases: {}", self.cases)?;
+        writeln!(f, "  coverage-guided cases: {}", self.coverage_guided_cases)?;
+        writeln!(f, "  AST oracle comparisons: {}", self.oracle_comparisons)?;
+        writeln!(
+            f,
+            "  metamorphic variants checked: {}",
+            self.metamorphic_variants
+        )?;
+        writeln!(f, "  opcode kinds seen: {}", self.opcode_kinds.len())?;
+        if !self.opcode_kinds.is_empty() {
+            writeln!(
+                f,
+                "  opcode coverage: {}",
+                self.opcode_kinds
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )?;
+        }
         writeln!(
             f,
             "  optimizer stress cases: {}",
@@ -1670,11 +2140,17 @@ impl fmt::Display for FuzzFailureReason {
         match self {
             FuzzFailureReason::Compile(msg) => write!(f, "compile failure: {}", msg),
             FuzzFailureReason::Verification(msg) => write!(f, "verification failure:\n{}", msg),
+            FuzzFailureReason::AstOracle(msg) => {
+                write!(f, "AST oracle comparison failure:\n{}", msg)
+            }
             FuzzFailureReason::BackendComparison(msg) => {
                 write!(f, "backend comparison failure:\n{}", msg)
             }
             FuzzFailureReason::TraceReplay(msg) => write!(f, "trace replay failure:\n{}", msg),
             FuzzFailureReason::TraceDiff(msg) => write!(f, "trace diff failure:\n{}", msg),
+            FuzzFailureReason::Metamorphic(msg) => {
+                write!(f, "metamorphic equivalence failure:\n{}", msg)
+            }
         }
     }
 }
@@ -1682,6 +2158,38 @@ impl fmt::Display for FuzzFailureReason {
 fn push_coverage_json(out: &mut String, coverage: &FuzzCoverage) {
     out.push('{');
     write!(out, "\"cases\":{}", coverage.cases).expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"coverage_guided_cases\":{}",
+        coverage.coverage_guided_cases
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"oracle_comparisons\":{}",
+        coverage.oracle_comparisons
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"metamorphic_variants\":{}",
+        coverage.metamorphic_variants
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"opcode_kinds_seen\":{}",
+        coverage.opcode_kinds.len()
+    )
+    .expect("write to string cannot fail");
+    out.push_str(",\"opcode_kinds\":[");
+    for (index, opcode) in coverage.opcode_kinds.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        push_json_string(out, opcode);
+    }
+    out.push(']');
     write!(
         out,
         ",\"optimizer_stress_cases\":{}",
@@ -1747,6 +2255,12 @@ fn push_failure_json(out: &mut String, failure: &FuzzFailure) {
     push_json_string(out, failure.reason.tag());
     out.push_str(",\"reason\":");
     push_json_string(out, &failure.reason.to_string());
+    write!(
+        out,
+        ",\"failure_fingerprint\":\"{:016x}\"",
+        failure.failure_fingerprint
+    )
+    .expect("write to string cannot fail");
     out.push_str(",\"coverage_at_failure\":");
     push_coverage_json(out, &failure.coverage_at_failure);
     out.push_str(",\"original_source_hash\":");
@@ -1871,9 +2385,14 @@ mod tests {
         assert_eq!(report.coverage.local_array_reads, 12);
         assert_eq!(report.coverage.local_array_writes, 12);
         assert_eq!(report.coverage.helper_functions, 12);
+        assert_eq!(report.coverage.coverage_guided_cases, 12);
+        assert!(report.coverage.oracle_comparisons >= 12);
+        assert!(report.coverage.metamorphic_variants >= 12);
+        assert!(report.coverage.opcode_kinds.contains("Return"));
         assert!(report.coverage.helper_array_interactions > 0);
         assert!(report.to_json().contains("\"success\":true"));
         assert!(report.to_json().contains("\"coverage\""));
+        assert!(report.to_json().contains("\"opcode_kinds\""));
     }
 
     #[test]
@@ -1972,7 +2491,7 @@ mod tests {
     }
 
     #[test]
-    fn shrinker_preserves_matching_failure_kind() {
+    fn shrinker_preserves_matching_failure_fingerprint() {
         let source = concat!(
             "func main() {\n",
             "  int x = 1;\n",
@@ -1981,9 +2500,33 @@ mod tests {
             "}\n"
         );
 
-        let shrunk = shrink_source(source, "compile");
+        let signature = FailureSignature::from_reason(&audit_source(source).unwrap());
+        let shrunk = shrink_source(source, signature);
         assert!(shrunk.len() < source.len(), "{shrunk}");
-        assert!(has_same_failure(&shrunk, "compile"));
+        assert!(has_same_failure(&shrunk, signature));
+    }
+
+    #[test]
+    fn metamorphic_variants_preserve_observable_behavior() {
+        let source = concat!(
+            "func main() {\n",
+            "  int x = 3;\n",
+            "  print x;\n",
+            "  return x * 7;\n",
+            "}\n"
+        );
+
+        let original = observable_source_outcome(source).unwrap();
+        let variants = metamorphic_variants(source);
+        assert!(variants.len() >= 3);
+        for variant in variants {
+            assert!(
+                audit_source_core(&variant).is_none(),
+                "variant failed audit:\n{}",
+                variant
+            );
+            assert_eq!(observable_source_outcome(&variant).unwrap(), original);
+        }
     }
 
     #[test]
@@ -2001,6 +2544,7 @@ mod tests {
             case_index: 3,
             case_seed: 0x1234,
             reason: &reason,
+            failure_fingerprint: reason.fingerprint(),
             original_source: "func main() { return 1; }\n",
             minimized_source: "func main() { return 1; }\n",
             coverage: &coverage,
@@ -2009,6 +2553,7 @@ mod tests {
 
         assert!(manifest.contains("case_index: 3"));
         assert!(manifest.contains("reason: trace-diff"));
+        assert!(manifest.contains("failure_fingerprint:"));
         assert!(
             manifest.contains("repro_command: minilang --fuzz 4 --fuzz-seed 0x0000000000005eed")
         );

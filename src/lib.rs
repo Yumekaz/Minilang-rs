@@ -21,6 +21,7 @@ pub mod ast;
 pub mod audit;
 pub mod compare;
 pub mod compiler;
+pub mod evidence;
 pub mod fuzz;
 pub mod gc;
 pub mod gc_vm;
@@ -28,6 +29,7 @@ pub mod jit;
 pub mod lexer;
 pub mod limits;
 pub mod optimizer;
+pub mod oracle;
 pub mod parser;
 pub mod repl;
 pub mod runtime;
@@ -47,6 +49,7 @@ pub use compare::{
     compare_backends, BackendComparisonReport, BackendOutcome, BackendRun, BackendRunStatus,
 };
 pub use compiler::{CompiledProgram, Compiler, Opcode};
+pub use evidence::{generate_evidence_report, EvidenceConfig, EvidenceReport};
 pub use fuzz::{
     run_fuzzer, FuzzConfig, FuzzCoverage, FuzzFailure, FuzzFailureReason, FuzzMode, FuzzReport,
 };
@@ -55,6 +58,7 @@ pub use gc_vm::{GcValue, GcVm, GcVmResult, HeapArray};
 pub use jit::{ExecutableMemory, JitCompiler, MachineCode, Reg};
 pub use lexer::Lexer;
 pub use optimizer::{OptimizationStats, Optimizer};
+pub use oracle::{compare_ast_oracle, run_ast_oracle, OracleComparisonReport, OracleOutcome};
 pub use parser::Parser;
 pub use repl::Repl;
 pub use runtime::{GcArray, GlobalStore, LocalFrame, Value, ValueStack};
