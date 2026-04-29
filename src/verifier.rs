@@ -191,7 +191,7 @@ impl Verifier {
         }
 
         let valid = errors.is_empty();
-        let backend_eligibility = self.backend_eligibility(program, valid);
+        let backend_eligibility = self.backend_eligibility(program, valid, &possible_traps);
 
         VerificationReport {
             valid,
@@ -846,7 +846,12 @@ impl Verifier {
         )
     }
 
-    fn backend_eligibility(&self, program: &CompiledProgram, valid: bool) -> BackendEligibility {
+    fn backend_eligibility(
+        &self,
+        program: &CompiledProgram,
+        valid: bool,
+        possible_traps: &[TrapCode],
+    ) -> BackendEligibility {
         if !valid {
             let rejected = BackendStatus::no("verification errors");
             return BackendEligibility {
@@ -861,17 +866,26 @@ impl Verifier {
             vm: BackendStatus::yes(),
             gc_vm: BackendStatus::yes(),
             optimized_vm: BackendStatus::yes(),
-            jit: self.jit_status(program),
+            jit: self.jit_status(program, possible_traps),
         }
     }
 
-    fn jit_status(&self, program: &CompiledProgram) -> BackendStatus {
-        jit_status_for_target(program)
+    fn jit_status(&self, program: &CompiledProgram, possible_traps: &[TrapCode]) -> BackendStatus {
+        jit_status_for_target(program, possible_traps)
     }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn jit_status_for_target(program: &CompiledProgram) -> BackendStatus {
+fn jit_status_for_target(program: &CompiledProgram, possible_traps: &[TrapCode]) -> BackendStatus {
+    if !possible_traps.is_empty() {
+        let traps = possible_traps
+            .iter()
+            .map(|trap| format!("{trap:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return BackendStatus::no(format!("JIT requires trap-free bytecode; possible {traps}"));
+    }
+
     if program.functions.len() != 1 {
         return BackendStatus::no("JIT requires exactly one function");
     }
@@ -899,7 +913,10 @@ fn jit_status_for_target(program: &CompiledProgram) -> BackendStatus {
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-fn jit_status_for_target(_program: &CompiledProgram) -> BackendStatus {
+fn jit_status_for_target(
+    _program: &CompiledProgram,
+    _possible_traps: &[TrapCode],
+) -> BackendStatus {
     BackendStatus::no("current build target is not linux x86-64")
 }
 
@@ -1112,6 +1129,21 @@ mod tests {
 
         assert!(report.valid, "{:#?}", report.errors);
         assert!(report.possible_traps.contains(&TrapCode::UndefinedLocal));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn jit_rejects_programs_with_possible_traps() {
+        let program = compile_source("func main() { int x; return x; }");
+        let report = Verifier::new().verify(&program);
+
+        assert!(!report.backend_eligibility.jit.eligible);
+        assert!(report
+            .backend_eligibility
+            .jit
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("trap-free")));
     }
 
     #[test]
