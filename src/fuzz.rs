@@ -1435,23 +1435,26 @@ fn invert_first_branch(program: &mut Program) -> bool {
 
 fn invert_first_branch_in_body(stmts: &mut [Stmt]) -> bool {
     for stmt in stmts {
-        match stmt {
-            Stmt::If {
-                condition,
-                then_body,
-                else_body,
-                ..
-            } => {
-                let original_then = then_body.clone();
-                let original_else = else_body.take().unwrap_or_default();
-                let span = condition.span();
-                *condition = logical_not(condition.clone(), span);
-                *then_body = original_else;
-                *else_body = Some(original_then);
+        if let Stmt::If {
+            condition,
+            then_body,
+            else_body,
+            ..
+        } = stmt
+        {
+            let original_then = then_body.clone();
+            let original_else = else_body.take().unwrap_or_default();
+            let span = condition.span();
+            *condition = logical_not(condition.clone(), span);
+            *then_body = original_else;
+            *else_body = Some(original_then);
+            return true;
+        }
+
+        if let Stmt::While { body, .. } = stmt {
+            if invert_first_branch_in_body(body) {
                 return true;
             }
-            Stmt::While { body, .. } if invert_first_branch_in_body(body) => return true,
-            _ => {}
         }
     }
     false
@@ -1539,25 +1542,26 @@ fn reorder_first_independent_statement_in_body(stmts: &mut Vec<Stmt>) -> bool {
     }
 
     for stmt in stmts {
-        match stmt {
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                if reorder_first_independent_statement_in_body(then_body) {
-                    return true;
-                }
-                if let Some(else_body) = else_body {
-                    if reorder_first_independent_statement_in_body(else_body) {
-                        return true;
-                    }
-                }
-            }
-            Stmt::While { body, .. } if reorder_first_independent_statement_in_body(body) => {
+        if let Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } = stmt
+        {
+            if reorder_first_independent_statement_in_body(then_body) {
                 return true;
             }
-            _ => {}
+            if let Some(else_body) = else_body {
+                if reorder_first_independent_statement_in_body(else_body) {
+                    return true;
+                }
+            }
+        }
+
+        if let Stmt::While { body, .. } = stmt {
+            if reorder_first_independent_statement_in_body(body) {
+                return true;
+            }
         }
     }
     false
