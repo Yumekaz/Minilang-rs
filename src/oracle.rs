@@ -242,8 +242,12 @@ impl<'a> AstOracle<'a> {
                 if let Some(size) = array_size {
                     self.declare_or_update(name, Slot::Array(vec![0; *size as usize]))?;
                 } else if let Some(expr) = init_expr {
+                    if self.lookup_slot(name).is_none() {
+                        self.current_scope_mut()?
+                            .insert(name.clone(), Slot::Scalar(None));
+                    }
                     let value = self.eval_expr(expr)?;
-                    self.declare_or_update(name, Slot::Scalar(Some(value)))?;
+                    self.assign_scalar(name, value)?;
                 } else if self.lookup_slot(name).is_none() {
                     self.current_scope_mut()?
                         .insert(name.clone(), Slot::Scalar(None));
@@ -256,13 +260,16 @@ impl<'a> AstOracle<'a> {
                 value,
                 ..
             } => {
-                let value = self.eval_expr(value)?;
                 match index_expr {
                     Some(index_expr) => {
                         let index = checked_array_index(self.eval_expr(index_expr)?)?;
+                        let value = self.eval_expr(value)?;
                         self.assign_array(target, index, value)?;
                     }
-                    None => self.assign_scalar(target, value)?,
+                    None => {
+                        let value = self.eval_expr(value)?;
+                        self.assign_scalar(target, value)?;
+                    }
                 }
                 Ok(Control::Continue)
             }
@@ -501,7 +508,7 @@ impl<'a> AstOracle<'a> {
     }
 
     fn lookup_slot(&self, name: &str) -> Option<&Slot> {
-        for frame in self.frames.iter().rev() {
+        if let Some(frame) = self.frames.last() {
             for scope in frame.scopes.iter().rev() {
                 if let Some(slot) = scope.get(name) {
                     return Some(slot);
@@ -512,7 +519,7 @@ impl<'a> AstOracle<'a> {
     }
 
     fn lookup_slot_mut(&mut self, name: &str) -> Option<&mut Slot> {
-        for frame in self.frames.iter_mut().rev() {
+        if let Some(frame) = self.frames.last_mut() {
             for scope in frame.scopes.iter_mut().rev() {
                 if let Some(slot) = scope.get_mut(name) {
                     return Some(slot);
@@ -610,7 +617,7 @@ mod tests {
     use super::*;
     use crate::{Compiler, Lexer, Parser, SemanticAnalyzer};
 
-    fn parse_and_compile(source: &str) -> (Program, CompiledProgram) {
+    fn parse_program(source: &str) -> Program {
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -618,8 +625,17 @@ mod tests {
         SemanticAnalyzer::new()
             .analyze(&program)
             .expect("semantic analysis failed");
+        program
+    }
+
+    fn parse_and_compile(source: &str) -> (Program, CompiledProgram) {
+        let program = parse_program(source);
         let compiled = Compiler::new().compile(&program).0;
         (program, compiled)
+    }
+
+    fn run_source(source: &str) -> OracleOutcome {
+        run_ast_oracle(&parse_program(source))
     }
 
     #[test]
@@ -659,5 +675,152 @@ mod tests {
         assert!(report.equivalent, "{report:#?}");
         assert!(!report.oracle.success);
         assert_eq!(report.oracle.trap_code, TrapCode::UndefinedLocal);
+    }
+
+    #[test]
+    fn oracle_short_circuits_function_side_effects() {
+        let outcome = run_source(
+            "int flag = 0;\n\
+             func boom() { flag = flag + 100; return 1 / 0; }\n\
+             func bump() { flag = flag + 1; return 1; }\n\
+             func main() {\n\
+               if (0 && boom()) { flag = flag + 10; } else { flag = flag + 2; }\n\
+               if (1 || boom()) { flag = flag + 3; }\n\
+               if (bump() && 1) { flag = flag + 4; }\n\
+               print flag;\n\
+               return flag;\n\
+             }\n",
+        );
+
+        assert!(outcome.success, "{outcome:#?}");
+        assert_eq!(outcome.return_value, 10);
+        assert_eq!(outcome.output, vec!["OUTPUT: 10"]);
+    }
+
+    #[test]
+    fn oracle_keeps_function_locals_separate_from_globals_and_callers() {
+        let outcome = run_source(
+            "int g = 2;\n\
+             func adjust(int n) {\n\
+               int local = n + g;\n\
+               g = local + 3;\n\
+               return local;\n\
+             }\n\
+             func shadow(int n) {\n\
+               int local = n * 2;\n\
+               return local + g;\n\
+             }\n\
+             func main() {\n\
+               int local = 4;\n\
+               int a = adjust(local);\n\
+               int b = shadow(local);\n\
+               print local;\n\
+               print g;\n\
+               print a;\n\
+               print b;\n\
+               return local + g + a + b;\n\
+             }\n",
+        );
+
+        assert!(outcome.success, "{outcome:#?}");
+        assert_eq!(outcome.return_value, 36);
+        assert_eq!(
+            outcome.output,
+            vec!["OUTPUT: 4", "OUTPUT: 9", "OUTPUT: 6", "OUTPUT: 17"]
+        );
+    }
+
+    #[test]
+    fn oracle_evaluates_local_array_index_before_value() {
+        let outcome = run_source(
+            "int marker = 0;\n\
+             func idx() { marker = marker + 1; return marker; }\n\
+             func val() { marker = marker * 10; return marker; }\n\
+             func main() {\n\
+               int local[3];\n\
+               local[idx()] = val();\n\
+               print marker;\n\
+               print local[1];\n\
+               return marker + local[1];\n\
+             }\n",
+        );
+
+        assert!(outcome.success, "{outcome:#?}");
+        assert_eq!(outcome.return_value, 20);
+        assert_eq!(outcome.output, vec!["OUTPUT: 10", "OUTPUT: 10"]);
+    }
+
+    #[test]
+    fn oracle_executes_loop_branches() {
+        let outcome = run_source(
+            "func main() {\n\
+               int i = 0;\n\
+               int sum = 0;\n\
+               while (i < 5) {\n\
+                 if (i == 3) { sum = sum + 30; } else { sum = sum + i; }\n\
+                 i = i + 1;\n\
+               }\n\
+               print sum;\n\
+               return sum;\n\
+             }\n",
+        );
+
+        assert!(outcome.success, "{outcome:#?}");
+        assert_eq!(outcome.return_value, 37);
+        assert_eq!(outcome.output, vec!["OUTPUT: 37"]);
+    }
+
+    #[test]
+    fn oracle_wraps_i32_arithmetic_edges() {
+        let outcome = run_source(
+            "func main() {\n\
+               int max = 2147483647;\n\
+               int min = max + 1;\n\
+               int wrap_div = min / (0 - 1);\n\
+               int neg = -min;\n\
+               print min;\n\
+               print wrap_div;\n\
+               print neg;\n\
+               return min + wrap_div + neg;\n\
+             }\n",
+        );
+
+        assert!(outcome.success, "{outcome:#?}");
+        assert_eq!(outcome.return_value, -2147483648);
+        assert_eq!(
+            outcome.output,
+            vec![
+                "OUTPUT: -2147483648",
+                "OUTPUT: -2147483648",
+                "OUTPUT: -2147483648"
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_preserves_output_before_trap() {
+        let outcome = run_source(
+            "func main() {\n\
+               print 7;\n\
+               return 10 / (1 - 1);\n\
+             }\n",
+        );
+
+        assert!(!outcome.success);
+        assert_eq!(outcome.trap_code, TrapCode::DivideByZero);
+        assert_eq!(outcome.output, vec!["OUTPUT: 7"]);
+    }
+
+    #[test]
+    fn oracle_local_initializer_reads_own_uninitialized_slot() {
+        let outcome = run_source(
+            "func main() {\n\
+               int x = x;\n\
+               return x;\n\
+             }\n",
+        );
+
+        assert!(!outcome.success);
+        assert_eq!(outcome.trap_code, TrapCode::UndefinedLocal);
     }
 }

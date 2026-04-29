@@ -1,0 +1,7 @@
+id: jit-undefined-local-proof-gate
+status: fixed
+expected: vm_trap_undefined_local_jit_skipped
+proof_gate: verifier_possible_trap_blocks_jit
+introduced_by: JIT local load/store eligibility expansion
+fixed_by: verifier reports UndefinedLocal as a possible trap before backend eligibility
+

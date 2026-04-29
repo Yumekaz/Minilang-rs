@@ -17,7 +17,7 @@ use crate::{
     compare_ast_oracle, compile, diff_vm_gc_traces, replay_vm_trace, run_ast_oracle,
     CompiledProgram, OracleOutcome, SemanticAnalyzer, Verifier,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write};
 use std::fs;
 use std::io;
@@ -67,6 +67,13 @@ pub struct FuzzCoverage {
     pub coverage_guided_cases: usize,
     pub oracle_comparisons: usize,
     pub metamorphic_variants: usize,
+    pub metamorphic_return_neutral: usize,
+    pub metamorphic_dead_branch: usize,
+    pub metamorphic_unused_local: usize,
+    pub metamorphic_algebraic_neutral: usize,
+    pub metamorphic_branch_inversion: usize,
+    pub metamorphic_helper_wrapping: usize,
+    pub metamorphic_statement_reordering: usize,
     pub optimizer_stress_cases: usize,
     pub helper_functions: usize,
     pub helper_calls: usize,
@@ -159,6 +166,29 @@ struct GeneratedProgram {
     features: FeatureSet,
 }
 
+#[derive(Debug, Clone)]
+struct MetamorphicVariant {
+    family: MetamorphicFamily,
+    source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MetamorphicFamily {
+    ReturnNeutral,
+    DeadBranch,
+    UnusedLocal,
+    AlgebraicNeutral,
+    BranchInversion,
+    HelperWrapping,
+    StatementReordering,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Binding {
+    ty: Type,
+    is_array: bool,
+}
+
 struct ProgramGenerator {
     rng: Rng,
     max_expr_depth: usize,
@@ -232,8 +262,9 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
         }
         let opcode_names = compiled_opcode_names(&generated.source);
         coverage.observe_opcodes(&opcode_names);
-        let metamorphic_variant_count = metamorphic_variants(&generated.source).len();
-        coverage.metamorphic_variants += metamorphic_variant_count;
+        let metamorphic_variants = metamorphic_variants_with_families(&generated.source);
+        let metamorphic_variant_count = metamorphic_variants.len();
+        coverage.observe_metamorphic_variants(&metamorphic_variants);
         coverage.oracle_comparisons += 1 + metamorphic_variant_count;
         guidance.observe(&generated.features, &opcode_names);
 
@@ -406,6 +437,23 @@ impl FuzzCoverage {
             self.opcode_kinds.insert((*opcode).to_string());
         }
     }
+
+    fn observe_metamorphic_variants(&mut self, variants: &[MetamorphicVariant]) {
+        self.metamorphic_variants += variants.len();
+        for variant in variants {
+            match variant.family {
+                MetamorphicFamily::ReturnNeutral => self.metamorphic_return_neutral += 1,
+                MetamorphicFamily::DeadBranch => self.metamorphic_dead_branch += 1,
+                MetamorphicFamily::UnusedLocal => self.metamorphic_unused_local += 1,
+                MetamorphicFamily::AlgebraicNeutral => self.metamorphic_algebraic_neutral += 1,
+                MetamorphicFamily::BranchInversion => self.metamorphic_branch_inversion += 1,
+                MetamorphicFamily::HelperWrapping => self.metamorphic_helper_wrapping += 1,
+                MetamorphicFamily::StatementReordering => {
+                    self.metamorphic_statement_reordering += 1
+                }
+            }
+        }
+    }
 }
 
 impl FailureSignature {
@@ -413,6 +461,20 @@ impl FailureSignature {
         Self {
             tag: reason.tag(),
             fingerprint: reason.fingerprint(),
+        }
+    }
+}
+
+impl MetamorphicFamily {
+    fn label(self) -> &'static str {
+        match self {
+            MetamorphicFamily::ReturnNeutral => "return-neutral",
+            MetamorphicFamily::DeadBranch => "dead-branch",
+            MetamorphicFamily::UnusedLocal => "unused-local",
+            MetamorphicFamily::AlgebraicNeutral => "algebraic-neutral",
+            MetamorphicFamily::BranchInversion => "branch-inversion",
+            MetamorphicFamily::HelperWrapping => "helper-wrapping",
+            MetamorphicFamily::StatementReordering => "statement-reordering",
         }
     }
 }
@@ -478,29 +540,35 @@ fn audit_metamorphic_source(source: &str) -> Option<FuzzFailureReason> {
         Err(reason) => return Some(reason),
     };
 
-    for (index, variant) in metamorphic_variants(source).into_iter().enumerate() {
+    for (index, variant) in metamorphic_variants_with_families(source)
+        .into_iter()
+        .enumerate()
+    {
+        let family = variant.family.label();
+        let variant = variant.source;
         if variant == source {
             continue;
         }
         if let Some(reason) = audit_source_core(&variant) {
             return Some(FuzzFailureReason::Metamorphic(format!(
-                "variant {} failed audit: {}",
-                index, reason
+                "variant {} ({}) failed audit: {}",
+                index, family, reason
             )));
         }
         let variant_outcome = match observable_source_outcome(&variant) {
             Ok(outcome) => outcome,
             Err(reason) => {
                 return Some(FuzzFailureReason::Metamorphic(format!(
-                    "variant {} could not produce an oracle outcome: {}",
-                    index, reason
+                    "variant {} ({}) could not produce an oracle outcome: {}",
+                    index, family, reason
                 )));
             }
         };
         if variant_outcome != original {
             return Some(FuzzFailureReason::Metamorphic(format!(
-                "variant {} changed observable behavior: {} vs {}",
+                "variant {} ({}) changed observable behavior: {} vs {}",
                 index,
+                family,
                 variant_outcome.summary(),
                 original.summary()
             )));
@@ -1062,6 +1130,13 @@ fn feature_names(features: &FeatureSet) -> Vec<&'static str> {
 }
 
 fn metamorphic_variants(source: &str) -> Vec<String> {
+    metamorphic_variants_with_families(source)
+        .into_iter()
+        .map(|variant| variant.source)
+        .collect()
+}
+
+fn metamorphic_variants_with_families(source: &str) -> Vec<MetamorphicVariant> {
     let Some(program) = parse_program(source) else {
         return Vec::new();
     };
@@ -1069,10 +1144,17 @@ fn metamorphic_variants(source: &str) -> Vec<String> {
     let mut variants = Vec::new();
 
     let mut return_neutral = program.clone();
+    let mut changed = false;
     for function in &mut return_neutral.functions {
-        wrap_return_exprs_with_zero(&mut function.body);
+        changed |= wrap_return_exprs_with_zero(&mut function.body);
     }
-    variants.push(emit_program(&return_neutral));
+    if changed {
+        push_metamorphic_variant(
+            &mut variants,
+            MetamorphicFamily::ReturnNeutral,
+            return_neutral,
+        );
+    }
 
     let mut dead_branch = program.clone();
     if let Some(main) = dead_branch
@@ -1081,58 +1163,100 @@ fn metamorphic_variants(source: &str) -> Vec<String> {
         .find(|function| function.name == "main")
     {
         main.body.insert(0, dead_print_branch());
-        variants.push(emit_program(&dead_branch));
+        push_metamorphic_variant(&mut variants, MetamorphicFamily::DeadBranch, dead_branch);
     }
 
-    let mut neutral_local = program;
+    let mut neutral_local = program.clone();
     if let Some(main) = neutral_local
         .functions
         .iter_mut()
         .find(|function| function.name == "main")
     {
-        if !main
-            .body
-            .iter()
-            .any(|stmt| declares_name(stmt, "__qydrel_mm0"))
-        {
-            main.body.splice(0..0, neutral_local_statements());
-            variants.push(emit_program(&neutral_local));
-        }
+        let local_name = unique_function_local_name(&program, main, "__qydrel_mm");
+        main.body
+            .splice(0..0, neutral_local_statements(&local_name));
+        push_metamorphic_variant(&mut variants, MetamorphicFamily::UnusedLocal, neutral_local);
     }
 
-    variants.sort();
-    variants.dedup();
+    let mut algebraic_neutral = program.clone();
+    if apply_algebraic_neutral_rewrites(&mut algebraic_neutral) {
+        push_metamorphic_variant(
+            &mut variants,
+            MetamorphicFamily::AlgebraicNeutral,
+            algebraic_neutral,
+        );
+    }
+
+    let mut branch_inversion = program.clone();
+    if invert_first_branch(&mut branch_inversion) {
+        push_metamorphic_variant(
+            &mut variants,
+            MetamorphicFamily::BranchInversion,
+            branch_inversion,
+        );
+    }
+
+    let mut helper_wrapping = program.clone();
+    if add_helper_wrapping(&mut helper_wrapping) {
+        push_metamorphic_variant(
+            &mut variants,
+            MetamorphicFamily::HelperWrapping,
+            helper_wrapping,
+        );
+    }
+
+    let mut statement_reordering = program;
+    if reorder_first_independent_statement(&mut statement_reordering) {
+        push_metamorphic_variant(
+            &mut variants,
+            MetamorphicFamily::StatementReordering,
+            statement_reordering,
+        );
+    }
+
+    variants.sort_by(|left, right| {
+        left.source
+            .cmp(&right.source)
+            .then_with(|| left.family.cmp(&right.family))
+    });
+    variants.dedup_by(|left, right| left.source == right.source);
     variants
 }
 
-fn wrap_return_exprs_with_zero(stmts: &mut [Stmt]) {
+fn push_metamorphic_variant(
+    variants: &mut Vec<MetamorphicVariant>,
+    family: MetamorphicFamily,
+    candidate: Program,
+) {
+    let source = emit_program(&candidate);
+    if parse_checked_program(&source).is_ok() {
+        variants.push(MetamorphicVariant { family, source });
+    }
+}
+
+fn wrap_return_exprs_with_zero(stmts: &mut [Stmt]) -> bool {
+    let mut changed = false;
     for stmt in stmts {
         match stmt {
             Stmt::Return { value, span } => {
-                *value = Expr::Binary {
-                    op: BinaryOp::Add,
-                    left: Box::new(value.clone()),
-                    right: Box::new(Expr::IntLiteral {
-                        value: 0,
-                        span: *span,
-                    }),
-                    span: *span,
-                };
+                *value = neutral_add_zero(value.clone(), *span);
+                changed = true;
             }
             Stmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                wrap_return_exprs_with_zero(then_body);
+                changed |= wrap_return_exprs_with_zero(then_body);
                 if let Some(else_body) = else_body {
-                    wrap_return_exprs_with_zero(else_body);
+                    changed |= wrap_return_exprs_with_zero(else_body);
                 }
             }
-            Stmt::While { body, .. } => wrap_return_exprs_with_zero(body),
+            Stmt::While { body, .. } => changed |= wrap_return_exprs_with_zero(body),
             _ => {}
         }
     }
+    changed
 }
 
 fn dead_print_branch() -> Stmt {
@@ -1151,23 +1275,23 @@ fn dead_print_branch() -> Stmt {
     }
 }
 
-fn neutral_local_statements() -> Vec<Stmt> {
+fn neutral_local_statements(name: &str) -> Vec<Stmt> {
     let span = Span::default();
     vec![
         Stmt::VarDecl {
             var_type: Type::Int,
-            name: "__qydrel_mm0".to_string(),
+            name: name.to_string(),
             init_expr: Some(Expr::IntLiteral { value: 0, span }),
             array_size: None,
             span,
         },
         Stmt::Assign {
-            target: "__qydrel_mm0".to_string(),
+            target: name.to_string(),
             index_expr: None,
             value: Expr::Binary {
                 op: BinaryOp::Add,
                 left: Box::new(Expr::Identifier {
-                    name: "__qydrel_mm0".to_string(),
+                    name: name.to_string(),
                     span,
                 }),
                 right: Box::new(Expr::IntLiteral { value: 0, span }),
@@ -1176,6 +1300,461 @@ fn neutral_local_statements() -> Vec<Stmt> {
             span,
         },
     ]
+}
+
+fn apply_algebraic_neutral_rewrites(program: &mut Program) -> bool {
+    let mut changed = false;
+    for global in &mut program.globals {
+        if global.var_type == Type::Int {
+            if let Some(init_expr) = &mut global.init_expr {
+                let span = init_expr.span();
+                *init_expr = neutral_mul_one(init_expr.clone(), span);
+                changed = true;
+            }
+        }
+    }
+
+    let global_bindings = global_bindings(program);
+    for function in &mut program.functions {
+        let mut bindings = function_bindings(&global_bindings, function);
+        changed |= apply_algebraic_neutral_to_body(&mut function.body, &mut bindings);
+    }
+    changed
+}
+
+fn apply_algebraic_neutral_to_body(
+    stmts: &mut [Stmt],
+    bindings: &mut BTreeMap<String, Binding>,
+) -> bool {
+    let mut changed = false;
+    for stmt in stmts {
+        match stmt {
+            Stmt::VarDecl {
+                var_type,
+                name,
+                init_expr,
+                array_size,
+                ..
+            } => {
+                if array_size.is_none() && *var_type == Type::Int {
+                    if let Some(init_expr) = init_expr {
+                        let span = init_expr.span();
+                        *init_expr = neutral_mul_one(init_expr.clone(), span);
+                        changed = true;
+                    }
+                }
+                bindings.insert(
+                    name.clone(),
+                    Binding {
+                        ty: *var_type,
+                        is_array: array_size.is_some(),
+                    },
+                );
+            }
+            Stmt::Assign {
+                target,
+                index_expr,
+                value,
+                ..
+            } => {
+                if let Some(index_expr) = index_expr {
+                    let span = index_expr.span();
+                    *index_expr = neutral_add_zero(index_expr.clone(), span);
+                    changed = true;
+                }
+                if bindings
+                    .get(target)
+                    .map(|binding| binding.ty == Type::Int)
+                    .unwrap_or(false)
+                {
+                    let span = value.span();
+                    *value = neutral_sub_zero(value.clone(), span);
+                    changed = true;
+                }
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+                ..
+            } => {
+                let span = condition.span();
+                *condition = double_not(condition.clone(), span);
+                changed = true;
+
+                let mut then_bindings = bindings.clone();
+                changed |= apply_algebraic_neutral_to_body(then_body, &mut then_bindings);
+                if let Some(else_body) = else_body {
+                    let mut else_bindings = bindings.clone();
+                    changed |= apply_algebraic_neutral_to_body(else_body, &mut else_bindings);
+                }
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                let span = condition.span();
+                *condition = double_not(condition.clone(), span);
+                changed = true;
+
+                let mut body_bindings = bindings.clone();
+                changed |= apply_algebraic_neutral_to_body(body, &mut body_bindings);
+            }
+            Stmt::Return { value, .. } => {
+                let span = value.span();
+                *value = neutral_mul_one(value.clone(), span);
+                changed = true;
+            }
+            Stmt::Print { value, .. } => {
+                if infer_expr_type(value, bindings) == Some(Type::Int) {
+                    let span = value.span();
+                    *value = neutral_add_zero(value.clone(), span);
+                    changed = true;
+                }
+            }
+            Stmt::ExprStmt { expr, .. } => {
+                if infer_expr_type(expr, bindings) == Some(Type::Int) {
+                    let span = expr.span();
+                    *expr = neutral_mul_one(expr.clone(), span);
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn invert_first_branch(program: &mut Program) -> bool {
+    for function in &mut program.functions {
+        if invert_first_branch_in_body(&mut function.body) {
+            return true;
+        }
+    }
+    false
+}
+
+fn invert_first_branch_in_body(stmts: &mut [Stmt]) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+                ..
+            } => {
+                let original_then = then_body.clone();
+                let original_else = else_body.take().unwrap_or_default();
+                let span = condition.span();
+                *condition = logical_not(condition.clone(), span);
+                *then_body = original_else;
+                *else_body = Some(original_then);
+                return true;
+            }
+            Stmt::While { body, .. } => {
+                if invert_first_branch_in_body(body) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn add_helper_wrapping(program: &mut Program) -> bool {
+    let helper_name = unique_top_level_name(program, "__qydrel_wrap");
+    let param_name = unique_top_level_name(program, "__qydrel_arg");
+    let mut changed = false;
+    for function in &mut program.functions {
+        changed |= wrap_returns_with_helper(&mut function.body, &helper_name);
+    }
+    if !changed {
+        return false;
+    }
+
+    let span = Span::default();
+    program.functions.insert(
+        0,
+        Function {
+            name: helper_name,
+            params: vec![Param {
+                param_type: Type::Int,
+                name: param_name.clone(),
+                span,
+            }],
+            body: vec![Stmt::Return {
+                value: Expr::Identifier {
+                    name: param_name,
+                    span,
+                },
+                span,
+            }],
+            span,
+        },
+    );
+    true
+}
+
+fn wrap_returns_with_helper(stmts: &mut [Stmt], helper_name: &str) -> bool {
+    let mut changed = false;
+    for stmt in stmts {
+        match stmt {
+            Stmt::Return { value, .. } => {
+                let span = value.span();
+                *value = Expr::Call {
+                    name: helper_name.to_string(),
+                    args: vec![value.clone()],
+                    span,
+                };
+                changed = true;
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                changed |= wrap_returns_with_helper(then_body, helper_name);
+                if let Some(else_body) = else_body {
+                    changed |= wrap_returns_with_helper(else_body, helper_name);
+                }
+            }
+            Stmt::While { body, .. } => changed |= wrap_returns_with_helper(body, helper_name),
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn reorder_first_independent_statement(program: &mut Program) -> bool {
+    for function in &mut program.functions {
+        if reorder_first_independent_statement_in_body(&mut function.body) {
+            return true;
+        }
+    }
+    false
+}
+
+fn reorder_first_independent_statement_in_body(stmts: &mut Vec<Stmt>) -> bool {
+    for index in 0..stmts.len().saturating_sub(1) {
+        if can_reorder_adjacent_statements(&stmts[index], &stmts[index + 1]) {
+            stmts.swap(index, index + 1);
+            return true;
+        }
+    }
+
+    for stmt in stmts {
+        match stmt {
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                if reorder_first_independent_statement_in_body(then_body) {
+                    return true;
+                }
+                if let Some(else_body) = else_body {
+                    if reorder_first_independent_statement_in_body(else_body) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::While { body, .. } => {
+                if reorder_first_independent_statement_in_body(body) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn can_reorder_adjacent_statements(left: &Stmt, right: &Stmt) -> bool {
+    let Some(left_write) = reorderable_scalar_write(left) else {
+        return false;
+    };
+    let Some(right_write) = reorderable_scalar_write(right) else {
+        return false;
+    };
+    left_write != right_write
+}
+
+fn reorderable_scalar_write(stmt: &Stmt) -> Option<&str> {
+    match stmt {
+        Stmt::VarDecl {
+            name,
+            init_expr,
+            array_size,
+            ..
+        } if array_size.is_none()
+            && init_expr
+                .as_ref()
+                .map(expr_is_reorder_constant)
+                .unwrap_or(true) =>
+        {
+            Some(name)
+        }
+        Stmt::Assign {
+            target,
+            index_expr: None,
+            value,
+            ..
+        } if expr_is_reorder_constant(value) => Some(target),
+        _ => None,
+    }
+}
+
+fn expr_is_reorder_constant(expr: &Expr) -> bool {
+    match expr {
+        Expr::IntLiteral { .. } | Expr::BoolLiteral { .. } => true,
+        Expr::Unary { operand, .. } => expr_is_reorder_constant(operand),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            *op != BinaryOp::Div
+                && expr_is_reorder_constant(left)
+                && expr_is_reorder_constant(right)
+        }
+        Expr::Identifier { .. } | Expr::Call { .. } | Expr::ArrayIndex { .. } => false,
+    }
+}
+
+fn global_bindings(program: &Program) -> BTreeMap<String, Binding> {
+    let mut bindings = BTreeMap::new();
+    for global in &program.globals {
+        bindings.insert(
+            global.name.clone(),
+            Binding {
+                ty: global.var_type,
+                is_array: global.array_size.is_some(),
+            },
+        );
+    }
+    bindings
+}
+
+fn function_bindings(
+    global_bindings: &BTreeMap<String, Binding>,
+    function: &Function,
+) -> BTreeMap<String, Binding> {
+    let mut bindings = global_bindings.clone();
+    for param in &function.params {
+        bindings.insert(
+            param.name.clone(),
+            Binding {
+                ty: param.param_type,
+                is_array: false,
+            },
+        );
+    }
+    bindings
+}
+
+fn infer_expr_type(expr: &Expr, bindings: &BTreeMap<String, Binding>) -> Option<Type> {
+    match expr {
+        Expr::IntLiteral { .. } => Some(Type::Int),
+        Expr::BoolLiteral { .. } => Some(Type::Bool),
+        Expr::Identifier { name, .. } => bindings
+            .get(name)
+            .and_then(|binding| (!binding.is_array).then_some(binding.ty)),
+        Expr::Binary {
+            op, left, right, ..
+        } => match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+                (infer_expr_type(left, bindings) == Some(Type::Int)
+                    && infer_expr_type(right, bindings) == Some(Type::Int))
+                .then_some(Type::Int)
+            }
+            BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Ge => {
+                (infer_expr_type(left, bindings) == Some(Type::Int)
+                    && infer_expr_type(right, bindings) == Some(Type::Int))
+                .then_some(Type::Bool)
+            }
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::And | BinaryOp::Or => Some(Type::Bool),
+        },
+        Expr::Unary { op, operand, .. } => match op {
+            UnaryOp::Neg => {
+                (infer_expr_type(operand, bindings) == Some(Type::Int)).then_some(Type::Int)
+            }
+            UnaryOp::Not => Some(Type::Bool),
+        },
+        Expr::Call { .. } => Some(Type::Int),
+        Expr::ArrayIndex { array_name, .. } => bindings
+            .get(array_name)
+            .and_then(|binding| binding.is_array.then_some(binding.ty)),
+    }
+}
+
+fn neutral_add_zero(expr: Expr, span: Span) -> Expr {
+    Expr::Binary {
+        op: BinaryOp::Add,
+        left: Box::new(expr),
+        right: Box::new(Expr::IntLiteral { value: 0, span }),
+        span,
+    }
+}
+
+fn neutral_sub_zero(expr: Expr, span: Span) -> Expr {
+    Expr::Binary {
+        op: BinaryOp::Sub,
+        left: Box::new(expr),
+        right: Box::new(Expr::IntLiteral { value: 0, span }),
+        span,
+    }
+}
+
+fn neutral_mul_one(expr: Expr, span: Span) -> Expr {
+    Expr::Binary {
+        op: BinaryOp::Mul,
+        left: Box::new(expr),
+        right: Box::new(Expr::IntLiteral { value: 1, span }),
+        span,
+    }
+}
+
+fn logical_not(expr: Expr, span: Span) -> Expr {
+    Expr::Unary {
+        op: UnaryOp::Not,
+        operand: Box::new(expr),
+        span,
+    }
+}
+
+fn double_not(expr: Expr, span: Span) -> Expr {
+    let inner = logical_not(expr, span);
+    logical_not(inner, span)
+}
+
+fn top_level_name_exists(program: &Program, name: &str) -> bool {
+    program.globals.iter().any(|global| global.name == name)
+        || program
+            .functions
+            .iter()
+            .any(|function| function.name == name)
+}
+
+fn unique_top_level_name(program: &Program, prefix: &str) -> String {
+    let mut index = 0usize;
+    loop {
+        let name = format!("{}{}", prefix, index);
+        if !top_level_name_exists(program, &name) {
+            return name;
+        }
+        index += 1;
+    }
+}
+
+fn unique_function_local_name(program: &Program, function: &Function, prefix: &str) -> String {
+    let mut index = 0usize;
+    loop {
+        let name = format!("{}{}", prefix, index);
+        let conflicts_with_param = function.params.iter().any(|param| param.name == name);
+        let conflicts_with_local = function.body.iter().any(|stmt| declares_name(stmt, &name));
+        if !top_level_name_exists(program, &name) && !conflicts_with_param && !conflicts_with_local
+        {
+            return name;
+        }
+        index += 1;
+    }
 }
 
 fn declares_name(stmt: &Stmt, name: &str) -> bool {
@@ -2088,6 +2667,41 @@ impl fmt::Display for FuzzCoverage {
             "  metamorphic variants checked: {}",
             self.metamorphic_variants
         )?;
+        writeln!(
+            f,
+            "  metamorphic return-neutral variants: {}",
+            self.metamorphic_return_neutral
+        )?;
+        writeln!(
+            f,
+            "  metamorphic dead-branch variants: {}",
+            self.metamorphic_dead_branch
+        )?;
+        writeln!(
+            f,
+            "  metamorphic unused-local variants: {}",
+            self.metamorphic_unused_local
+        )?;
+        writeln!(
+            f,
+            "  metamorphic algebraic-neutral variants: {}",
+            self.metamorphic_algebraic_neutral
+        )?;
+        writeln!(
+            f,
+            "  metamorphic branch-inversion variants: {}",
+            self.metamorphic_branch_inversion
+        )?;
+        writeln!(
+            f,
+            "  metamorphic helper-wrapping variants: {}",
+            self.metamorphic_helper_wrapping
+        )?;
+        writeln!(
+            f,
+            "  metamorphic statement-reordering variants: {}",
+            self.metamorphic_statement_reordering
+        )?;
         writeln!(f, "  opcode kinds seen: {}", self.opcode_kinds.len())?;
         if !self.opcode_kinds.is_empty() {
             writeln!(
@@ -2196,6 +2810,48 @@ fn push_coverage_json(out: &mut String, coverage: &FuzzCoverage) {
         out,
         ",\"metamorphic_variants\":{}",
         coverage.metamorphic_variants
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"metamorphic_return_neutral\":{}",
+        coverage.metamorphic_return_neutral
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"metamorphic_dead_branch\":{}",
+        coverage.metamorphic_dead_branch
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"metamorphic_unused_local\":{}",
+        coverage.metamorphic_unused_local
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"metamorphic_algebraic_neutral\":{}",
+        coverage.metamorphic_algebraic_neutral
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"metamorphic_branch_inversion\":{}",
+        coverage.metamorphic_branch_inversion
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"metamorphic_helper_wrapping\":{}",
+        coverage.metamorphic_helper_wrapping
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"metamorphic_statement_reordering\":{}",
+        coverage.metamorphic_statement_reordering
     )
     .expect("write to string cannot fail");
     write!(
@@ -2410,11 +3066,20 @@ mod tests {
         assert_eq!(report.coverage.coverage_guided_cases, 12);
         assert!(report.coverage.oracle_comparisons >= 12);
         assert!(report.coverage.metamorphic_variants >= 12);
+        assert!(report.coverage.metamorphic_return_neutral >= 12);
+        assert!(report.coverage.metamorphic_dead_branch >= 12);
+        assert!(report.coverage.metamorphic_unused_local >= 12);
+        assert!(report.coverage.metamorphic_algebraic_neutral >= 12);
+        assert!(report.coverage.metamorphic_branch_inversion >= 12);
+        assert!(report.coverage.metamorphic_helper_wrapping >= 12);
         assert!(report.coverage.opcode_kinds.contains("Return"));
         assert!(report.coverage.helper_array_interactions > 0);
         assert!(report.to_json().contains("\"success\":true"));
         assert!(report.to_json().contains("\"coverage\""));
         assert!(report.to_json().contains("\"opcode_kinds\""));
+        assert!(report
+            .to_json()
+            .contains("\"metamorphic_branch_inversion\""));
     }
 
     #[test]
@@ -2545,21 +3210,43 @@ mod tests {
         let source = concat!(
             "func main() {\n",
             "  int x = 3;\n",
+            "  int y = 4;\n",
             "  print x;\n",
+            "  if (x > 0) {\n",
+            "    x = x + 1;\n",
+            "  } else {\n",
+            "    x = x - 1;\n",
+            "  }\n",
             "  return x * 7;\n",
             "}\n"
         );
 
         let original = observable_source_outcome(source).unwrap();
-        let variants = metamorphic_variants(source);
-        assert!(variants.len() >= 3);
+        let variants = metamorphic_variants_with_families(source);
+        let variant_sources = metamorphic_variants(source);
+        assert_eq!(variant_sources.len(), variants.len());
+        let families = variants
+            .iter()
+            .map(|variant| variant.family)
+            .collect::<BTreeSet<_>>();
+        assert!(variants.len() >= 7);
+        assert!(families.contains(&MetamorphicFamily::ReturnNeutral));
+        assert!(families.contains(&MetamorphicFamily::DeadBranch));
+        assert!(families.contains(&MetamorphicFamily::UnusedLocal));
+        assert!(families.contains(&MetamorphicFamily::AlgebraicNeutral));
+        assert!(families.contains(&MetamorphicFamily::BranchInversion));
+        assert!(families.contains(&MetamorphicFamily::HelperWrapping));
+        assert!(families.contains(&MetamorphicFamily::StatementReordering));
         for variant in variants {
             assert!(
-                audit_source_core(&variant).is_none(),
+                audit_source_core(&variant.source).is_none(),
                 "variant failed audit:\n{}",
-                variant
+                variant.source
             );
-            assert_eq!(observable_source_outcome(&variant).unwrap(), original);
+            assert_eq!(
+                observable_source_outcome(&variant.source).unwrap(),
+                original
+            );
         }
     }
 

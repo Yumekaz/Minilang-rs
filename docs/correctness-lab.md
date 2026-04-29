@@ -25,6 +25,7 @@ compiled bytecode
   -> VM trace replay
   -> VM vs GC VM trace diff
   -> deterministic/metamorphic fuzzer cases
+  -> checked-in bug museum cases
   -> evidence report
 ```
 
@@ -41,7 +42,8 @@ compiled bytecode
 | Audit JSON | `--audit-json <file>` | With trace replay or trace diff, writes stable machine-readable evidence including trace summaries and fingerprints. |
 | Fuzz audit | `--fuzz <cases>` | Generated valid programs pass compile, verification, AST oracle, backend comparison, trace replay, VM/GC trace diff, and metamorphic-equivalence checks. |
 | Fuzz JSON | `--fuzz-json <file>` | Writes a machine-readable fuzz summary with seed, pass/fail status, and generator feature coverage. |
-| Evidence report | `--evidence-report <dir>` | Writes a corpus/fuzz/backend/trace/historical-artifact report as JSON and Markdown. |
+| Bug museum | `cargo test --locked --test bug_museum_tests` | Audits checked-in historical/minimized bug repros under `tests/bugs/` against documented expected behavior. |
+| Evidence report | `--evidence-report <dir>` | Writes a corpus/fuzz/backend/trace/coverage-dashboard/bug-museum report as JSON and Markdown. |
 
 These checks do not prove the language is complete or production-ready. They
 make the current compiler/runtime contracts executable and reproducible.
@@ -72,6 +74,7 @@ cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts f
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts fuzz-artifacts/seed-c0ffee --fuzz-json fuzz-summary-c0ffee.json
 cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xbadc0de --fuzz-mode optimizer-stress --fuzz-artifacts fuzz-artifacts/optimizer --fuzz-json fuzz-optimizer.json
 cargo run --locked --release -- --evidence-report evidence/latest
+cargo test --locked --test bug_museum_tests
 ```
 
 Run the broader Rust checks:
@@ -113,9 +116,10 @@ expressions, and replace array operations with smaller equivalent candidates
 while preserving the same failure fingerprint.
 
 The fuzzer also runs metamorphic variants of generated programs. These variants
-add neutral arithmetic, dead branches, and unused local work, then require the
-AST oracle observable result to stay unchanged while each variant still passes
-the normal verifier/backend/trace audit pipeline.
+now include neutral arithmetic, dead branches, unused local work, branch
+inversion, identity helper wrapping, and conservative independent-statement
+reordering. Each variant must keep the AST oracle observable result unchanged
+while still passing the normal verifier/backend/trace audit pipeline.
 
 Use `--fuzz-corpus-out tests/corpus` when you intentionally want a minimized
 fuzzer failure to become a checked-in regression input. The corpus runner in
@@ -136,9 +140,37 @@ report.md
 fuzz-artifacts/
 ```
 
-The JSON is meant for automation. The Markdown is meant for reviewers: it shows
-the corpus status, fuzz matrix coverage, backend matrix, and any minimized bug
-artifacts discovered under `fuzz-artifacts/`.
+The JSON is meant for automation. The Markdown is meant for reviewers: it starts
+with a coverage dashboard that aggregates feature counts and opcode coverage
+across checked-in corpus programs plus the deterministic evidence fuzz matrix.
+That dashboard is observed execution evidence, not a proof that every language
+case has been tested.
+
+The report also lists checked-in bug museum entries from `tests/bugs/` and any
+local minimized fuzz artifacts discovered under `fuzz-artifacts/`. The museum
+path is durable review material; the local fuzz-artifact scan is for whatever
+failure packages are present on the machine that generated the report.
+
+## Bug Museum
+
+The bug museum lives under `tests/bugs/`. Each entry has:
+
+```text
+metadata.txt
+repro.lang
+README.md
+```
+
+`metadata.txt` names the status, expected behavior, and proof gate. The test
+runner audits every documented `expected` behavior it knows about, so adding a
+new museum entry means adding either a known expected-behavior label or a new
+test branch.
+
+The current entry, `tests/bugs/jit_undefined_local/`, is fixed. It documents a
+valid source program that reads an uninitialized local. VM backends must trap
+with `UndefinedLocal`; the JIT must be skipped because the verifier records
+`UndefinedLocal` as a possible trap and blocks trap-capable bytecode from JIT
+eligibility on Linux x86-64.
 
 ## Backend Boundaries
 

@@ -13,7 +13,8 @@ Current surface:
 - **Backend comparison**: reference VM, GC VM, optimized VM, and JIT when eligible
 - **Trace audit tooling**: JSON traces, replay checks, and VM-vs-GC instruction diffs
 - **Self-audit fuzzer**: deterministic valid-program generation, coverage-guided candidate selection, metamorphic variants, exact failure fingerprints, shrinking, and artifacts
-- **Evidence report**: one command writes corpus, fuzz, backend, trace, and historical-artifact summaries
+- **Evidence report**: one command writes corpus, fuzz, backend, trace, coverage-dashboard, and bug-museum summaries
+- **Bug museum**: checked-in minimized regressions with metadata and an audit runner
 - **Runtime systems pieces**: custom allocators, mark-sweep GC primitives, and a narrow x86-64 JIT
 
 This is intentionally not a production language. The language stays small so
@@ -70,6 +71,9 @@ cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xbadc0de --fuzz-mode opt
 # Write a reviewer-facing evidence packet
 cargo run --locked --release -- --evidence-report evidence/latest
 
+# Audit checked-in historical/minimized bug repros
+cargo test --locked --test bug_museum_tests
+
 # Run with JIT compiler when the bytecode is eligible (Linux x86-64 only)
 cargo run --locked --release -- examples/fibonacci.lang --jit
 
@@ -86,7 +90,8 @@ backend-comparator proof gates. Unsupported bytecode is skipped by the
 comparator and falls back to the VM in normal `--jit` execution.
 
 See [`docs/correctness-lab.md`](docs/correctness-lab.md) for the audit workflow
-and what each command proves.
+and what each command proves. See [`docs/bug-museum.md`](docs/bug-museum.md)
+for the checked-in historical bug cases.
 
 ## Project Structure
 
@@ -161,6 +166,7 @@ Deterministic generated-program testing:
 - Generated programs cover initialized scalars, bounded loops, helper functions, prints, in-bounds global/local array reads/writes, loop-indexed array writes, and helper calls fed by local-array reads
 - Every case runs compile, verification, AST-oracle comparison, backend comparison, trace replay, VM/GC trace diff, and metamorphic-equivalence checks
 - Coverage-guided candidate selection prefers generated programs that add new feature/opcode coverage
+- Metamorphic checks now include neutral arithmetic, dead branches, unused local work, branch inversion, identity helper wrapping, and conservative independent-statement reordering
 - `--fuzz-mode optimizer-stress` generates programs shaped around constant folding, strength reduction, jump/control-flow remapping, dead-code elimination, and stack-effect preservation
 - Reports generator feature coverage and can write a machine-readable run summary with `--fuzz-json <file>`
 - On first failure, the AST-aware shrinker tries function, statement, branch, expression, and array-operation reductions before falling back to line removal while preserving the same failure fingerprint
@@ -172,8 +178,16 @@ Deterministic generated-program testing:
 Reviewer-facing proof packet:
 - `--evidence-report <dir>` writes `report.json` and `report.md`
 - Audits every `tests/corpus/*.lang` file through verifier, AST oracle, backend matrix, trace replay, and VM/GC trace diff
-- Runs the seed/mode fuzz matrix and summarizes feature/opcode coverage
-- Scans existing minimized fuzz artifacts so historical bugs are visible instead of buried in local folders
+- Runs the seed/mode fuzz matrix and renders an aggregate feature/opcode coverage dashboard
+- Scans `tests/bugs/` so checked-in historical/minimized bugs are visible in reviewer evidence
+- Scans existing local minimized fuzz artifacts separately so machine-local failure packages remain visible without pretending they are durable museum entries
+
+### Bug Museum (`tests/bugs/`)
+
+Checked-in historical/minimized correctness repros:
+- Each entry has `metadata.txt`, `repro.lang`, and `README.md`
+- `tests/bug_museum_tests.rs` audits documented expected behavior
+- The current entry is a fixed JIT proof-gate case: reading an uninitialized local must trap in VM backends and must be skipped by the JIT
 
 ## Runtime And Systems Components
 
